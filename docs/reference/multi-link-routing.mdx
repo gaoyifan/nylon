@@ -159,6 +159,8 @@ Endpoint records should keep these identities separate:
 
 Configured endpoints update `ResolvedAddrPort` during DNS refresh. Learned endpoints are created from `ObservedAddrPort` and are GC'd when they stop responding.
 
+If an authenticated incoming packet arrives from an `ObservedAddrPort` that does not map to any existing endpoint identity for that peer on the observed local bind, nylon must split that address into a new learned `RemoteEndpointID` and corresponding `LinkID`. It must not rewrite an existing configured endpoint record's `ResolvedAddrPort`, and it must not alias the packet onto an existing link that happens to share the same peer.
+
 ## Endpoint Discovery
 
 Endpoint discovery probes the cartesian product of local binds and remote endpoints:
@@ -213,7 +215,9 @@ The resolver should return an existing active or known link when possible:
 func ResolveIncomingLink(peer NodeId, ep conn.Endpoint) (LinkID, bool)
 ```
 
-If the packet is an authenticated probe and no link exists, the resolver may create a learned endpoint and link. For non-probe control packets, unknown links should be rejected or ignored; route updates must not implicitly create new links because that would allow unprobed adjacencies to enter the route table.
+The resolver first matches by exact `(peer, observed local bind, observed remote source endpoint)` identity. If the observed remote source endpoint does not belong to any existing endpoint identity on that bind, it is treated as a distinct remote endpoint rather than being merged into an existing configured or learned endpoint record.
+
+If the packet is an authenticated probe and no link exists, the resolver may create a learned endpoint and link for that newly observed remote endpoint. For non-probe control packets, unknown links should be rejected or ignored; route updates must not implicitly create new links because that would allow unprobed adjacencies to enter the route table.
 
 `handleNylonPacket` should resolve the link once and pass the same `LinkID` to every packet in the received bundle. If a bundle cannot be mapped to a link, the whole bundle is dropped.
 
