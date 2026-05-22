@@ -36,10 +36,11 @@ type LinkID struct {
     Peer           NodeId
     LocalBind      LocalBindID
     RemoteEndpoint RemoteEndpointID
+    Generation     uint64
 }
 ```
 
-`Peer` identifies the remote nylon node. `LocalBind` identifies the local interface, source address, or socket selector used to send packets. `RemoteEndpoint` identifies the configured or learned remote endpoint identity.
+`Peer` identifies the remote nylon node. `LocalBind` identifies the local interface, source address, or socket selector used to send packets. `RemoteEndpoint` identifies the configured or learned remote endpoint identity. `Generation` distinguishes successive concrete transports for the same endpoint identity.
 
 The router state should keep links directly:
 
@@ -118,6 +119,8 @@ If no binds are configured, nylon creates one implicit `default` bind. If endpoi
 
 The endpoint ID identifies the configured endpoint record, not a specific resolved IP address. A DNS or SRV endpoint can resolve to different addresses over time while keeping the same endpoint ID. Learned endpoints use generated IDs scoped to the peer and observed remote address.
 
+When a configured endpoint's `ResolvedAddrPort` changes, nylon allocates a new `Generation` for that `(Peer, LocalBind, RemoteEndpoint)` link. The old link is not removed immediately; it is left to age out through the normal route expiry and endpoint GC paths.
+
 ## Local Bind Abstraction
 
 Introduce a local bind abstraction below `state.NylonEndpoint` and above `polyamide/conn`:
@@ -138,9 +141,9 @@ type LocalBind struct {
 func MakeLinkEndpoint(bind LocalBind, remote netip.AddrPort) (conn.Endpoint, error)
 ```
 
-The resulting endpoint carries the remote destination and, when supported, the local source/interface selector. On Linux this can be implemented with `IP_PKTINFO` / `IPV6_PKTINFO`, reusing the existing sticky source machinery. The endpoint cache must be scoped to the whole `LinkID`; a `WgEndpoint` created for one local bind must not be reused by another local bind that happens to share the same remote address.
+The resulting endpoint carries the remote destination and, when supported, the local source/interface selector. On Linux this can be implemented with `IP_PKTINFO` / `IPV6_PKTINFO`, reusing the existing sticky source machinery. The Linux receive path may downcast to `*conn.StdNetEndpoint` at the boundary in order to recover the observed local source/interface and map the packet to a `LocalBindID`; that platform detail should not leak into router logic. The endpoint cache must be scoped to the whole `LinkID`; a `WgEndpoint` created for one local bind must not be reused by another local bind that happens to share the same remote address.
 
-On platforms without sticky socket support, explicit local binds should be rejected with a clear error until a platform-specific backend exists. The implicit `default` bind remains available and uses normal OS routing.
+Multi-link routing is Linux-only in the initial implementation. On other platforms, nylon keeps the implicit `default` bind only and rejects explicit local binds.
 
 Endpoint equality and deduplication must include both dimensions:
 
@@ -252,7 +255,7 @@ The selected route for a prefix is still a single best feasible route. Tie-break
 
 Ack retraction semantics are per retraction transmission, not just per prefix. When a retraction is sent in order to shorten hold time, nylon allocates a fresh opaque acknowledgment token (equivalent to Babel's acknowledgment-request opaque value) and records the active recipient link set for that token. A held route can be released after either its hold timer expires or every recorded recipient link has acknowledged that specific token. Links that were inactive, not selected for the broadcast, or created after the retraction was sent are not required to acknowledge that retraction instance, and a late acknowledgment for an older token must not satisfy a newer retraction.
 
-If nylon keeps the dedicated `AckRetract` control message instead of adopting a generic acknowledgment-request/ack pair, the token must be carried in both the retraction and the acknowledgment. A prefix-only `AckRetract(prefix)` shape is insufficient because it cannot distinguish one retraction instance from a later retraction of the same prefix.
+This follows Babel's acknowledgment-request model for urgent retractions ([RFC 8966 §3.3](https://datatracker.ietf.org/doc/html/rfc8966#section-3.3), [§3.5.4](https://datatracker.ietf.org/doc/html/rfc8966#section-3.5.4)). If nylon keeps the dedicated `AckRetract` control message instead of adopting a generic acknowledgment-request/ack pair, the token must be carried in both the retraction and the acknowledgment. A prefix-only `AckRetract(prefix)` shape is insufficient because it cannot distinguish one retraction instance from a later retraction of the same prefix. The same token may be retransmitted a small number of times together with that retraction; if not all acknowledgments arrive, hold-time expiry still releases the route.
 
 ## Pending Seqno Requests
 
@@ -338,15 +341,15 @@ prefix        via_node  via_link          metric
 10.0.0.2/32   bob       bob/wan0/public   1200
 ```
 
-IPC protobufs should add link fields without removing existing neighbour fields, so older clients can still display peer-level information.
+IPC protobufs should expose link fields directly. Compatibility shims for older peer-only clients are not required.
 
 ## Implementation Checklist
 
 1. Add `LocalBindID`, `RemoteEndpointID`, `LinkID`, and `Link` types in `state`.
 2. Replace `RouterState.Neighbours` with `RouterState.Links`, keeping helper methods for peer-level grouping.
 3. Extend configuration parsing for local binds and structured endpoint IDs while preserving string endpoint compatibility.
-4. Extend `conn.Endpoint` creation so a remote endpoint can be paired with a local bind selector.
-5. Change endpoint reconciliation and discovery to build `local bind x remote endpoint` links, while preventing multiple active links on the same bind from sharing the same concrete remote transport tuple.
+4. Extend `conn.Endpoint` creation so a remote endpoint can be paired with a local bind selector on Linux.
+5. Change endpoint reconciliation and discovery to build `local bind x remote endpoint` links, allocate a new link generation whenever `ResolvedAddrPort` changes, and prevent multiple active links on the same bind from sharing the same concrete remote transport tuple.
 6. Change probe tracking from token-to-time to token-to-link.
 7. Add incoming control-packet link resolution and require `LinkID` before route updates, seqno requests, and ack retracts enter router logic, with an unambiguous `(peer, bind, transport tuple)` mapping.
 8. Change route acquisition, seqno request forwarding, ack retract handling, and starvation handling to use `LinkID`.
@@ -366,6 +369,7 @@ IPC protobufs should add link fields without removing existing neighbour fields,
 - If one local interface fails, only links using that local bind go inactive.
 - If one remote endpoint fails, only links using that remote endpoint go inactive.
 - Data packets for a selected route are sent through the selected link endpoint, not the peer default endpoint.
+- When a configured endpoint's `ResolvedAddrPort` changes, nylon allocates a new link generation and lets the old one drain through normal expiry.
 - Two configured endpoint IDs that resolve to the same remote transport tuple on the same local bind do not create two active routed links or ambiguous incoming-link resolution.
 - Route updates received on different links from the same peer remain distinct neighbour-route entries.
 - Route updates, seqno requests, and ack retracts from unknown links are dropped unless the link was first established by an authenticated probe.
@@ -379,6 +383,7 @@ IPC protobufs should add link fields without removing existing neighbour fields,
 - No bandwidth aggregation.
 - No per-packet or per-flow load balancing.
 - No compatibility with standard Babel UDP/TLV implementations.
+- No multi-link support on non-Linux platforms in the initial implementation.
 - No requirement that each link use an independent WireGuard Noise session.
 
 ## Risks
