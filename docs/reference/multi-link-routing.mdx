@@ -159,7 +159,9 @@ Endpoint records should keep these identities separate:
 
 Configured endpoints update `ResolvedAddrPort` during DNS refresh. Learned endpoints are created from `ObservedAddrPort` and are GC'd when they stop responding.
 
-If an authenticated incoming packet arrives from an `ObservedAddrPort` that does not map to any existing endpoint identity for that peer on the observed local bind, nylon must split that address into a new learned `RemoteEndpointID` and corresponding `LinkID`. It must not rewrite an existing configured endpoint record's `ResolvedAddrPort`, and it must not alias the packet onto an existing link that happens to share the same peer.
+Babel neighbourship is transport-level, not config-label-level. Within a given `(Peer, LocalBind)`, a concrete remote transport tuple may back at most one routed link at a time. If multiple configured endpoint identities for the same peer and local bind resolve to the same remote `AddrPort`, nylon must not create multiple active routed links or leave incoming packet resolution ambiguous. The implementation must collapse that transport tuple to a single canonical routed link, or reject the conflicting endpoint state before it reaches routing logic.
+
+If an authenticated incoming packet arrives from an `ObservedAddrPort` that does not map to any existing routed link for that peer on the observed local bind, nylon must split that address into a new learned `RemoteEndpointID` and corresponding `LinkID`. It must not rewrite an existing configured endpoint record's `ResolvedAddrPort`, and it must not alias the packet onto an unrelated link that merely shares the same peer.
 
 ## Endpoint Discovery
 
@@ -215,7 +217,9 @@ The resolver should return an existing active or known link when possible:
 func ResolveIncomingLink(peer NodeId, ep conn.Endpoint) (LinkID, bool)
 ```
 
-The resolver first matches by exact `(peer, observed local bind, observed remote source endpoint)` identity. If the observed remote source endpoint does not belong to any existing endpoint identity on that bind, it is treated as a distinct remote endpoint rather than being merged into an existing configured or learned endpoint record.
+The resolver first matches by exact `(peer, observed local bind, observed remote source endpoint)` transport identity. That mapping must be injective: if multiple endpoint identities currently point at the same transport tuple on the same bind, they are not distinct routed adjacencies. Such collisions must be collapsed to one canonical link, or rejected before packet processing continues.
+
+If the observed remote source endpoint does not belong to any existing endpoint identity on that bind, it is treated as a distinct remote endpoint rather than being merged into an existing configured or learned endpoint record.
 
 If the packet is an authenticated probe and no link exists, the resolver may create a learned endpoint and link for that newly observed remote endpoint. For non-probe control packets, unknown links should be rejected or ignored; route updates must not implicitly create new links because that would allow unprobed adjacencies to enter the route table.
 
@@ -244,9 +248,29 @@ The selected route for a prefix is still a single best feasible route. Tie-break
 2. Prefer lower metric.
 3. Use deterministic `LinkID` ordering as the final tie-breaker.
 
-`BroadcastSendRouteUpdate` and `BroadcastRequestSeqno` should send over all active links. Duplicate suppression remains keyed by Babel source `(router-id, prefix)` and sequence number, not by link.
+`BroadcastSendRouteUpdate` and `BroadcastRequestSeqno` should send over all active links. Duplicate suppression for seqno requests remains keyed by Babel source `(router-id, prefix)` and requested sequence number, not by link.
 
-Ack retraction semantics are link-scoped. When a retraction is sent, nylon records the set of active links that received that retraction. A held route can be released after either its hold timer expires or every recorded recipient link has acknowledged the retraction. Links that were inactive, not selected for the broadcast, or created after the retraction was sent are not required to acknowledge that retraction.
+Ack retraction semantics are per retraction transmission, not just per prefix. When a retraction is sent in order to shorten hold time, nylon allocates a fresh opaque acknowledgment token (equivalent to Babel's acknowledgment-request opaque value) and records the active recipient link set for that token. A held route can be released after either its hold timer expires or every recorded recipient link has acknowledged that specific token. Links that were inactive, not selected for the broadcast, or created after the retraction was sent are not required to acknowledge that retraction instance, and a late acknowledgment for an older token must not satisfy a newer retraction.
+
+If nylon keeps the dedicated `AckRetract` control message instead of adopting a generic acknowledgment-request/ack pair, the token must be carried in both the retraction and the acknowledgment. A prefix-only `AckRetract(prefix)` shape is insufficient because it cannot distinguish one retraction instance from a later retraction of the same prefix.
+
+## Pending Seqno Requests
+
+Babel models seqno-request suppression and retry state as a router-wide table keyed by source `(prefix, router-id)`, not by adjacency. Nylon should do the same.
+
+`IOPending` remains link-scoped for packet batching, but seqno-request deduplication and resend tracking should live in a separate router-wide pending-requests table:
+
+```go
+type PendingSeqnoRequest struct {
+    Source       Source
+    RequestedSeq uint16
+    ForwardedFor *LinkID
+    RetryCount   uint8
+    ExpireAt     time.Time
+}
+```
+
+Repeated requests for the same source with a seqno that is not greater than the most recently forwarded request must be suppressed across all links. Forwarded requests must still be sent to at most one next-hop link, but retries may choose a different link later.
 
 ## Control Plane IO
 
@@ -267,7 +291,7 @@ SendNylonBundle(bundle, entry.Endpoint.WgEndpoint, peer)
 
 This ensures route updates, seqno requests, ack retracts, and probes are observed on the same logical adjacency that produced the route state.
 
-`IOPending` is scoped to `LinkID`, but duplicate suppression for seqno requests should remain source-based so repeated requests for the same `(router-id, prefix, seqno)` are suppressed across links when appropriate.
+`IOPending` is scoped to `LinkID`, but it must not own seqno-request duplicate suppression. That suppression belongs to the router-wide pending-requests table so repeated requests for the same `(router-id, prefix, seqno)` are suppressed across links.
 
 ## Data Plane Forwarding
 
@@ -322,16 +346,17 @@ IPC protobufs should add link fields without removing existing neighbour fields,
 2. Replace `RouterState.Neighbours` with `RouterState.Links`, keeping helper methods for peer-level grouping.
 3. Extend configuration parsing for local binds and structured endpoint IDs while preserving string endpoint compatibility.
 4. Extend `conn.Endpoint` creation so a remote endpoint can be paired with a local bind selector.
-5. Change endpoint reconciliation and discovery to build `local bind x remote endpoint` links.
+5. Change endpoint reconciliation and discovery to build `local bind x remote endpoint` links, while preventing multiple active links on the same bind from sharing the same concrete remote transport tuple.
 6. Change probe tracking from token-to-time to token-to-link.
-7. Add incoming control-packet link resolution and require `LinkID` before route updates, seqno requests, and ack retracts enter router logic.
+7. Add incoming control-packet link resolution and require `LinkID` before route updates, seqno requests, and ack retracts enter router logic, with an unambiguous `(peer, bind, transport tuple)` mapping.
 8. Change route acquisition, seqno request forwarding, ack retract handling, and starvation handling to use `LinkID`.
-9. Make held-route retraction acknowledgments track the recipient link set for each retraction.
-10. Change route selection to iterate active links and store `SelRoute.NhLink`.
-11. Change router IO queues from `NodeId` to `LinkID`.
-12. Change forwarding table entries to include `conn.Endpoint`, and set `TCElement.ToEp` during forwarding.
-13. Update WireGuard endpoint sync to deduplicate by local-bind plus remote endpoint.
-14. Update IPC, `nylon status`, tests, and docs.
+9. Add a router-wide pending seqno-request table keyed by Babel source and requested seqno, separate from link-scoped IO batching.
+10. Make held-route retraction acknowledgments track both the recipient link set and a fresh per-send acknowledgment token for each retraction instance.
+11. Change route selection to iterate active links and store `SelRoute.NhLink`.
+12. Change router IO queues from `NodeId` to `LinkID`.
+13. Change forwarding table entries to include `conn.Endpoint`, and set `TCElement.ToEp` during forwarding.
+14. Update WireGuard endpoint sync to deduplicate by local-bind plus remote endpoint.
+15. Update IPC, `nylon status`, tests, and docs.
 
 ## Acceptance Criteria
 
@@ -341,9 +366,11 @@ IPC protobufs should add link fields without removing existing neighbour fields,
 - If one local interface fails, only links using that local bind go inactive.
 - If one remote endpoint fails, only links using that remote endpoint go inactive.
 - Data packets for a selected route are sent through the selected link endpoint, not the peer default endpoint.
+- Two configured endpoint IDs that resolve to the same remote transport tuple on the same local bind do not create two active routed links or ambiguous incoming-link resolution.
 - Route updates received on different links from the same peer remain distinct neighbour-route entries.
 - Route updates, seqno requests, and ack retracts from unknown links are dropped unless the link was first established by an authenticated probe.
-- Held-route retractions are released after all links that received the retraction have acknowledged it, or after the hold timer expires.
+- Seqno-request duplicate suppression is source-scoped across all links, so redundant requests for the same `(router-id, prefix, seqno)` are not multiplied by link count.
+- Held-route retractions are released only after all links that received that specific retraction instance have acknowledged its token, or after the hold timer expires.
 - For each prefix, only one selected route is installed unless a future design explicitly adds ECMP.
 
 ## Non-Goals
