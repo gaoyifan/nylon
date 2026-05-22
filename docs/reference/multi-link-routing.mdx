@@ -1,0 +1,309 @@
+---
+title: Multi-Link Routing Design
+description: Implementation plan for treating local/remote endpoint pairs as independent routing links.
+---
+
+This document describes the target design for allowing multiple physical or logical links between the same two nylon nodes to participate independently in route selection.
+
+The goal is to replace the current "one neighbour node, many candidate endpoints, one best endpoint" model with a "one peer node, many routed links" model. Each link has its own local bind, remote endpoint, liveness, metric, neighbour route table, control-plane queue, and selected data-plane endpoint.
+
+:::note
+Multipath load balancing, ECMP, per-packet striping, and bandwidth aggregation are not goals of this design. For any prefix, nylon still selects a single best next-hop link.
+:::
+
+## Current Model
+
+Today, a neighbour is keyed by `NodeId`:
+
+```go
+type Neighbour struct {
+    Id     NodeId
+    Routes map[netip.Prefix]NeighRoute
+    Eps    []Endpoint
+}
+```
+
+Route computation calls `BestEndpoint()` and treats the chosen endpoint's metric as the cost of the whole neighbour. This makes multiple endpoints useful for failover and best-endpoint selection, but only one endpoint participates in routing at a time.
+
+Control messages are also queued per `NodeId`, and `flushIO()` sends them through the neighbour's best endpoint. Data forwarding stores the next-hop peer, but not the exact endpoint, so packets fall back to the peer's default endpoint.
+
+## Target Model
+
+The routed adjacency becomes a link, not a node. A link is identified by the tuple:
+
+```go
+type LinkID struct {
+    Peer          NodeId
+    LocalBind     LocalBindID
+    RemoteEndpoint RemoteEndpointID
+}
+```
+
+`Peer` identifies the remote nylon node. `LocalBind` identifies the local interface, source address, or socket selector used to send packets. `RemoteEndpoint` identifies the configured or learned remote UDP endpoint.
+
+The router state should keep links directly:
+
+```go
+type Link struct {
+    ID      LinkID
+    Peer    NodeId
+    Endpoint *NylonEndpoint
+    Routes  map[netip.Prefix]NeighRoute
+}
+
+type RouterState struct {
+    Id         NodeId
+    SelfSeqno  map[netip.Prefix]uint16
+    Routes     map[netip.Prefix]SelRoute
+    Sources    map[Source]FD
+    Links      map[LinkID]*Link
+    Advertised map[netip.Prefix]Advertisement
+}
+```
+
+Selected routes must store the selected link:
+
+```go
+type SelRoute struct {
+    PubRoute
+    NhLink      LinkID
+    NhNode      NodeId
+    ExpireAt    time.Time
+    RetractedBy []LinkID
+}
+```
+
+`Source` remains `(router-id, prefix)`, matching Babel's source identity. The link is only the adjacency used to receive, forward, and advertise routes.
+
+## Configuration
+
+Remote endpoints remain part of the shared central topology. Local binds are local node settings because interface names, source addresses, and routing policy are host-specific.
+
+Backward-compatible endpoint strings should continue to work:
+
+```yaml
+routers:
+  - id: alice
+    endpoints:
+      - "alice.example.com:57175"
+      - "192.168.1.2:57175"
+```
+
+They are normalized internally into endpoint records:
+
+```yaml
+routers:
+  - id: alice
+    endpoints:
+      - id: public
+        address: "alice.example.com:57175"
+      - id: lan
+        address: "192.168.1.2:57175"
+```
+
+Local binds are configured in `node.yaml`:
+
+```yaml
+binds:
+  - id: default
+  - id: wan0
+    interface: eth0
+    source: 203.0.113.10
+  - id: wan1
+    interface: eth1
+    source: 198.51.100.10
+```
+
+If no binds are configured, nylon creates one implicit `default` bind. If endpoint IDs are omitted, nylon derives stable IDs from the endpoint value.
+
+## Local Bind Abstraction
+
+Introduce a local bind abstraction below `state.NylonEndpoint` and above `polyamide/conn`:
+
+```go
+type LocalBindID string
+
+type LocalBind struct {
+    ID        LocalBindID
+    Interface string
+    Source    netip.Addr
+}
+```
+
+`conn.Endpoint` must be able to carry both the remote destination and an optional local selector. On Linux this can be implemented with `IP_PKTINFO` / `IPV6_PKTINFO`, reusing the existing sticky source machinery. On platforms without sticky socket support, local binds should either be rejected with a clear error or implemented by a platform-specific bind backend.
+
+Endpoint equality and deduplication must include both dimensions:
+
+```text
+old: remote DstIPPort
+new: local bind + remote DstIPPort
+```
+
+This affects endpoint reconciliation, WireGuard peer endpoint lists, probe matching, and status output.
+
+## Endpoint Discovery
+
+Endpoint discovery probes the cartesian product of local binds and remote endpoints:
+
+```text
+for each peer:
+  for each local bind:
+    for each remote endpoint:
+      probe(LinkID{peer, local bind, remote endpoint})
+```
+
+`PingBuf` should store the target `LinkID` by probe token, not just a timestamp. A returned pong updates that exact link's RTT, liveness, and metric.
+
+Incoming probes are matched using authenticated peer identity, observed remote source endpoint, and local receive selector:
+
+```text
+WireGuard public key -> NodeId
+packet source endpoint -> remote endpoint
+packet local receive address/interface -> local bind
+```
+
+If no link exists and the packet is an authenticated probe from a configured peer, nylon may create a learned remote endpoint scoped to the observed local bind. Learned links keep the same GC semantics as today's `remoteInit` endpoints.
+
+The probe protobuf can remain minimal for compatibility, but adding optional diagnostic fields is useful:
+
+```proto
+message Probe {
+  uint64 Token = 1;
+  optional uint64 ResponseToken = 2;
+  optional string SenderBindId = 3;
+  optional string SenderEndpointId = 4;
+}
+```
+
+These fields must not be trusted for authentication. The WireGuard peer and observed packet metadata remain authoritative.
+
+## Router Algorithm Changes
+
+Replace all route-algorithm entry points that accept a neighbour `NodeId` with `LinkID` where the operation is adjacency-specific:
+
+```go
+HandleNeighbourUpdate(s, r, linkID, adv)
+HandleSeqnoRequest(s, r, fromLinkID, src, reqSeqno, hopCnt)
+HandleAckRetract(s, r, linkID, prefix)
+```
+
+Route acquisition stores updates in `Link.Routes`, not `Neighbour.Routes`. Route selection iterates all active links:
+
+```text
+link cost = link.Endpoint.Metric() + HopCost
+route cost = link cost + advertised metric
+```
+
+The selected route for a prefix is still a single best feasible route. Tie-breaking should be stable:
+
+1. Keep the existing selected link when the route is otherwise equivalent.
+2. Prefer lower metric.
+3. Use deterministic `LinkID` ordering as the final tie-breaker.
+
+`BroadcastSendRouteUpdate` and `BroadcastRequestSeqno` should send over all active links. Duplicate suppression remains keyed by Babel source `(router-id, prefix)` and sequence number, not by link.
+
+## Control Plane IO
+
+Change pending router IO from peer-scoped to link-scoped:
+
+```go
+old: map[NodeId]*IOPending
+new: map[LinkID]*IOPending
+```
+
+`flushIO()` sends each pending bundle to the exact link endpoint:
+
+```go
+entry := links[linkID]
+peer := device.LookupPeer(entry.Peer)
+SendNylonBundle(bundle, entry.Endpoint.WgEndpoint, peer)
+```
+
+This ensures route updates, seqno requests, ack retracts, and probes are observed on the same logical adjacency that produced the route state.
+
+## Data Plane Forwarding
+
+The forwarding table must preserve the selected link endpoint:
+
+```go
+type RouteTableEntry struct {
+    Peer      *device.Peer
+    Endpoint  conn.Endpoint
+    LinkID    LinkID
+    Blackhole bool
+}
+```
+
+`TableInsertRoute()` resolves `route.NhLink` to its peer and endpoint. The traffic-control forwarding path must set both:
+
+```go
+packet.ToPeer = entry.Peer
+packet.ToEp = entry.Endpoint
+```
+
+This is required because the polyamide sender otherwise uses the peer's first/default endpoint, which would bypass link-level route selection.
+
+## WireGuard Endpoint Sync
+
+`syncWireGuardEndpoints()` should keep all active link endpoints as candidates for handshakes and keepalives, sorted by metric. It must not collapse endpoints that share the same remote address but use different local binds.
+
+Data packets selected by nylon routing use `TCElement.ToEp`, so the peer's default endpoint is only a fallback for handshakes, keepalives, and traffic that has no selected route endpoint.
+
+## Status and IPC
+
+Status output should expose links as first-class objects:
+
+```text
+peer  local_bind  remote_endpoint  active  metric  rtt  learned
+```
+
+Routes should show both next-hop node and next-hop link:
+
+```text
+prefix        via_node  via_link          metric
+10.0.0.2/32   bob       bob/wan0/public   1200
+```
+
+IPC protobufs should add link fields without removing existing neighbour fields, so older clients can still display peer-level information.
+
+## Implementation Checklist
+
+1. Add `LocalBindID`, `RemoteEndpointID`, `LinkID`, and `Link` types in `state`.
+2. Replace `RouterState.Neighbours` with `RouterState.Links`, keeping helper methods for peer-level grouping.
+3. Extend configuration parsing for local binds and structured endpoint IDs while preserving string endpoint compatibility.
+4. Extend `conn.Endpoint` creation so a remote endpoint can be paired with a local bind selector.
+5. Change endpoint reconciliation and discovery to build `local bind x remote endpoint` links.
+6. Change probe tracking from token-to-time to token-to-link.
+7. Change route acquisition, seqno request forwarding, ack retract handling, and starvation handling to use `LinkID`.
+8. Change route selection to iterate active links and store `SelRoute.NhLink`.
+9. Change router IO queues from `NodeId` to `LinkID`.
+10. Change forwarding table entries to include `conn.Endpoint`, and set `TCElement.ToEp` during forwarding.
+11. Update WireGuard endpoint sync to deduplicate by local-bind plus remote endpoint.
+12. Update IPC, `nylon status`, tests, and docs.
+
+## Acceptance Criteria
+
+- Two nodes with two local binds and two remote endpoints each can form four independent links.
+- Each link has independent liveness, RTT history, metric, and neighbour route table entries.
+- Babel route selection can choose any one of the active links as the next hop for a prefix.
+- If one local interface fails, only links using that local bind go inactive.
+- If one remote endpoint fails, only links using that remote endpoint go inactive.
+- Data packets for a selected route are sent through the selected link endpoint, not the peer default endpoint.
+- Route updates received on different links from the same peer remain distinct neighbour-route entries.
+- For each prefix, only one selected route is installed unless a future design explicitly adds ECMP.
+
+## Non-Goals
+
+- No ECMP.
+- No bandwidth aggregation.
+- No per-packet or per-flow load balancing.
+- No compatibility with standard Babel UDP/TLV implementations.
+- No requirement that each link use an independent WireGuard Noise session.
+
+## Risks
+
+The largest implementation risk is local bind portability. Linux can use packet info control messages for source/interface selection, while other platforms may require dedicated sockets or may initially support only the implicit default bind.
+
+The second risk is shared WireGuard peer state. Multiple endpoints for one peer share cryptographic session state. This is acceptable for single-selected-route forwarding, but it should not be treated as a foundation for packet striping without additional replay-window and reordering analysis.
+
+The third risk is route churn. Multiple links between the same two nodes can have close metrics, so stable tie-breaking and the existing link-switch deadband are required to avoid oscillation.
