@@ -85,6 +85,9 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 				}
 				for _, bind := range n.LocalCfg.NormalizedBinds() {
 					if bind.ID == localBind {
+						if nep.Bind != bind {
+							nep.WgEndpoint = nil
+						}
 						nep.Bind = bind
 						break
 					}
@@ -120,7 +123,7 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 		}
 		for _, bind := range n.LocalCfg.NormalizedBinds() {
 			for _, ep := range cfg.Endpoints {
-				nep := state.NewEndpoint(ep, false, nil, &n.RouterTunables)
+				nep := state.NewEndpoint(ep.Clone(), false, nil, &n.RouterTunables)
 				nep.LocalBind = bind.ID
 				nep.Bind = bind
 				stNeigh.Eps = append(stNeigh.Eps, nep)
@@ -180,6 +183,9 @@ func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.Dynam
 			}
 			for _, bind := range binds {
 				if bind.ID == localBind {
+					if nep.Bind != bind {
+						nep.WgEndpoint = nil
+					}
 					nep.Bind = bind
 					break
 				}
@@ -198,7 +204,7 @@ func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.Dynam
 			if _, ok := seen[id]; ok {
 				continue
 			}
-			nep := state.NewEndpoint(ep, false, nil, t)
+			nep := state.NewEndpoint(ep.Clone(), false, nil, t)
 			nep.LocalBind = bind.ID
 			nep.Bind = bind
 			eps = append(eps, nep)

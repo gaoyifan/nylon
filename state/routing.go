@@ -121,6 +121,7 @@ type PubRoute struct {
 	// In the selected route table, it represents the metric that
 	// the route will be advertised with.
 	FD
+	RetractionToken uint64
 }
 
 func (r PubRoute) String() string {

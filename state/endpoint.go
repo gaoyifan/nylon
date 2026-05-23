@@ -46,6 +46,34 @@ func NewDynamicEndpoint(value string) *DynamicEndpoint {
 	}
 }
 
+func (ep *DynamicEndpoint) Clone() *DynamicEndpoint {
+	if ep == nil {
+		return nil
+	}
+	if ep.rw == nil {
+		ep.rw = &sync.RWMutex{}
+	}
+	ep.rw.RLock()
+	defer ep.rw.RUnlock()
+	return &DynamicEndpoint{
+		ID:         ep.ID,
+		Value:      ep.Value,
+		lastValue:  ep.lastValue,
+		lastUpdate: ep.lastUpdate,
+		rw:         &sync.RWMutex{},
+	}
+}
+
+func (ep *DynamicEndpoint) SetResolved(ap netip.AddrPort) {
+	if ep.rw == nil {
+		ep.rw = &sync.RWMutex{}
+	}
+	ep.rw.Lock()
+	defer ep.rw.Unlock()
+	ep.lastValue = ap
+	ep.lastUpdate = time.Now()
+}
+
 func (ep *DynamicEndpoint) Parse() (host string, port uint16, err error) {
 	// Try to parse as AddrPort directly first to handle cases like [::1]:port correctly
 	if ap, err := netip.ParseAddrPort(ep.Value); err == nil {

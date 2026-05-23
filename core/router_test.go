@@ -891,6 +891,64 @@ func TestRouter_MultipleLinksToSamePeerHaveIndependentRoutes(t *testing.T) {
 	assert.Equal(t, uint32(21), rs.Routes[sPrefix].Metric)
 }
 
+func TestRouter_AckRetractCarriesRetractionToken(t *testing.T) {
+	tunables := ConfigureConstants()
+	rs := &state.RouterState{
+		RouterTunables: tunables,
+		Id:             "A",
+		Routes:         make(map[netip.Prefix]state.SelRoute),
+		Sources:        make(map[state.Source]state.FD),
+		Neighbours:     MakeNeighbours("B"),
+	}
+	h := &RouterHarness{}
+	AddLink(rs, NewMockEndpoint("B", 0))
+	link := rs.GetDefaultLink("B")
+	prefix := nodeToPrefix("S")
+
+	HandleLinkUpdate(rs, h, link.ID, state.PubRoute{
+		Source:          state.Source{NodeId: "S", Prefix: prefix},
+		FD:              state.FD{Seqno: 1, Metric: state.INF},
+		RetractionToken: 77,
+	})
+
+	h.GetActions().AssertContains(t, AckRetract(state.NodeId("B"), prefix, 77))
+}
+
+func TestRouter_AckRetractIgnoresStaleToken(t *testing.T) {
+	tunables := ConfigureConstants()
+	rs := &state.RouterState{
+		RouterTunables: tunables,
+		Id:             "A",
+		Routes:         make(map[netip.Prefix]state.SelRoute),
+		Sources:        make(map[state.Source]state.FD),
+		Neighbours:     MakeNeighbours("B"),
+	}
+	h := &RouterHarness{}
+	AddLink(rs, NewMockEndpoint("B", 0))
+	link := rs.GetDefaultLink("B")
+	prefix := nodeToPrefix("S")
+	rs.Routes[prefix] = state.SelRoute{
+		PubRoute: state.PubRoute{
+			Source:          state.Source{NodeId: "S", Prefix: prefix},
+			FD:              state.FD{Seqno: 1, Metric: state.INF},
+			RetractionToken: 100,
+		},
+		Nh:       "B",
+		NhLink:   link.ID,
+		ExpireAt: time.Now().Add(time.Hour),
+	}
+
+	HandleLinkAckRetract(rs, h, link.ID, prefix, 99)
+	if got := rs.Routes[prefix].RetractedBy; len(got) != 0 {
+		t.Fatalf("stale token should not ack route, got %v", got)
+	}
+
+	HandleLinkAckRetract(rs, h, link.ID, prefix, 100)
+	if _, ok := rs.Routes[prefix]; ok {
+		t.Fatalf("matching token should release fully acked held route, got %v", rs.Routes[prefix])
+	}
+}
+
 func TestRouter_HeldRouteInstallsBlackhole(t *testing.T) {
 	tunables := ConfigureConstants()
 	// A has a covering aggregate through B and a more specific route through C.

@@ -29,7 +29,7 @@ func (n *Nylon) GetLinkIO(linkID state.LinkID) *IOPending {
 	if !ok {
 		nio = &IOPending{
 			SeqnoReq: make(map[state.Source]state.Pair[uint16, uint8]),
-			Acks:     make(map[netip.Prefix]struct{}),
+			Acks:     make(map[netip.Prefix]uint64),
 			Updates:  make(map[netip.Prefix]*protocol.Ny_Update),
 		}
 		n.router.IO[linkID] = nio
@@ -42,16 +42,17 @@ func (n *Nylon) SendRouteUpdate(linkID state.LinkID, advRoute state.PubRoute) {
 	nio := n.GetLinkIO(linkID)
 	prefix, _ := advRoute.Prefix.MarshalBinary()
 	nio.Updates[advRoute.Prefix] = &protocol.Ny_Update{
-		RouterId: string(advRoute.NodeId),
-		Prefix:   prefix,
-		Seqno:    uint32(advRoute.Seqno),
-		Metric:   advRoute.Metric,
+		RouterId:        string(advRoute.NodeId),
+		Prefix:          prefix,
+		Seqno:           uint32(advRoute.Seqno),
+		Metric:          advRoute.Metric,
+		RetractionToken: advRoute.RetractionToken,
 	}
 }
 
-func (n *Nylon) SendAckRetract(linkID state.LinkID, prefix netip.Prefix) {
+func (n *Nylon) SendAckRetract(linkID state.LinkID, prefix netip.Prefix, token uint64) {
 	nio := n.GetLinkIO(linkID)
-	nio.Acks[prefix] = struct{}{}
+	nio.Acks[prefix] = token
 }
 
 func (n *Nylon) BroadcastSendRouteUpdate(advRoute state.PubRoute) {
@@ -182,7 +183,7 @@ func (n *Nylon) TableDeleteRoute(prefix netip.Prefix) {
 type IOPending struct {
 	// SeqnoReq values represent a pair of (seqno, hop count)
 	SeqnoReq map[state.Source]state.Pair[uint16, uint8]
-	Acks     map[netip.Prefix]struct{}
+	Acks     map[netip.Prefix]uint64
 	Updates  map[netip.Prefix]*protocol.Ny_Update
 }
 
@@ -363,6 +364,7 @@ func (n *Nylon) routerHandleRouteUpdate(linkID state.LinkID, update *protocol.Ny
 			Seqno:  uint16(update.Seqno),
 			Metric: update.Metric,
 		},
+		RetractionToken: update.GetRetractionToken(),
 	})
 	ComputeRoutes(n.RouterState, n)
 	return nil
@@ -378,7 +380,7 @@ func (n *Nylon) routerHandleAckRetract(linkID state.LinkID, update *protocol.Ny_
 	if !n.checkPrefix(prefix) || n.RouterState.GetLink(linkID) == nil {
 		return nil
 	}
-	HandleLinkAckRetract(n.RouterState, n, linkID, prefix)
+	HandleLinkAckRetract(n.RouterState, n, linkID, prefix, update.GetToken())
 	return nil
 }
 
@@ -455,11 +457,12 @@ func (n *Nylon) flushIO() error {
 					tLength += proto.Size(req)
 				}
 
-				for prefix := range nio.Acks {
+				for prefix, token := range nio.Acks {
 					prefixBytes, _ := prefix.MarshalBinary()
 					req := &protocol.Ny{Type: &protocol.Ny_AckRetractOp{
 						AckRetractOp: &protocol.Ny_AckRetract{
 							Prefix: prefixBytes,
+							Token:  token,
 						},
 					}}
 					if tLength != 0 && tLength+proto.Size(req) >= n.SafeMTU {

@@ -4,6 +4,7 @@ package core
 // https://datatracker.ietf.org/doc/html/rfc8966
 
 import (
+	"math/rand/v2"
 	"net/netip"
 	"slices"
 	"time"
@@ -15,7 +16,7 @@ import (
 // Router is an interface that defines the underlying router operations
 type Router interface {
 	SendRouteUpdate(link state.LinkID, advRoute state.PubRoute)
-	SendAckRetract(link state.LinkID, prefix netip.Prefix)
+	SendAckRetract(link state.LinkID, prefix netip.Prefix, token uint64)
 	BroadcastSendRouteUpdate(advRoute state.PubRoute)
 	RequestSeqno(link state.LinkID, src state.Source, seqno uint16, hopCnt uint8)
 	BroadcastRequestSeqno(src state.Source, seqno uint16, hopCnt uint8)
@@ -170,16 +171,6 @@ func RunGC(s *state.RouterState, r Router) {
 	}
 }
 
-func retract(s *state.RouterState, r Router, prefix netip.Prefix) {
-	tblEntry, ok := s.Routes[prefix]
-	if !ok {
-		r.RouterEvent(log.EventInconsistentState, "attempted to retract non-existent route", "prefix", prefix)
-		return // route does not exist
-	}
-	tblEntry.Metric = state.INF
-	r.BroadcastSendRouteUpdate(tblEntry.PubRoute)
-}
-
 func HandleSeqnoRequest(s *state.RouterState, r Router, fromNeigh state.NodeId, src state.Source, reqSeqno uint16, hopCnt uint8) {
 	fromLink := s.GetDefaultLink(fromNeigh)
 	if fromLink == nil {
@@ -279,10 +270,14 @@ func HandleAckRetract(s *state.RouterState, r Router, neighId state.NodeId, pref
 	if link == nil {
 		return
 	}
-	HandleLinkAckRetract(s, r, link.ID, prefix)
+	token := uint64(0)
+	if rt, ok := s.Routes[prefix]; ok {
+		token = rt.RetractionToken
+	}
+	HandleLinkAckRetract(s, r, link.ID, prefix, token)
 }
 
-func HandleLinkAckRetract(s *state.RouterState, r Router, linkID state.LinkID, prefix netip.Prefix) {
+func HandleLinkAckRetract(s *state.RouterState, r Router, linkID state.LinkID, prefix netip.Prefix, token uint64) {
 	rt, ok := s.Routes[prefix]
 	if !ok {
 		r.RouterEvent(log.EventInconsistentState, "attempted to ack the retraction of a non-existent route", "prefix", prefix)
@@ -290,6 +285,9 @@ func HandleLinkAckRetract(s *state.RouterState, r Router, linkID state.LinkID, p
 	}
 	if rt.Metric != state.INF {
 		return // retraction ACKs only apply to held routes
+	}
+	if rt.RetractionToken != 0 && token != rt.RetractionToken {
+		return
 	}
 	if !slices.Contains(rt.RetractedBy, linkID) {
 		rt.RetractedBy = append(rt.RetractedBy, linkID)
@@ -323,7 +321,7 @@ func HandleLinkUpdate(s *state.RouterState, r Router, linkID state.LinkID, adv s
 	_, ok := link.Routes[adv.Prefix]
 
 	if adv.Metric == state.INF {
-		r.SendAckRetract(linkID, adv.Source.Prefix)
+		r.SendAckRetract(linkID, adv.Source.Prefix, adv.RetractionToken)
 	}
 
 	if !ok {
@@ -631,10 +629,13 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 		if !exists || route.Metric == state.INF {
 			// route is no longer reachable, retract it
 			if oldRoute.Metric != state.INF {
-				retract(s, r, prefix)
-				r.RouterEvent(log.EventRouteRetracted, "retracted", "prefix", prefix, "old", oldRoute)
 				// Add the retracted route back as INF so it can be held
 				oldRoute.Metric = state.INF
+				if oldRoute.RetractionToken == 0 {
+					oldRoute.RetractionToken = rand.Uint64()
+				}
+				r.BroadcastSendRouteUpdate(oldRoute.PubRoute)
+				r.RouterEvent(log.EventRouteRetracted, "retracted", "prefix", prefix, "old", oldRoute)
 				oldRoute.RetractedBy = nil
 				newTable[prefix] = oldRoute
 				// insert blackhole

@@ -2,6 +2,8 @@ package core
 
 import (
 	"math/rand/v2"
+	"net"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -78,19 +80,61 @@ func (n *Nylon) ResolveIncomingLink(peer state.NodeId, endpoint conn.Endpoint) (
 	if endpoint == nil {
 		return state.LinkID{}, false
 	}
+	var remoteMatches []*state.Link
 	for _, link := range n.RouterState.GetPeerLinks(peer) {
 		nep := link.Endpoint.AsNylonEndpoint()
 		if nep == nil || nep.DynEP == nil {
 			continue
 		}
 		if nep.WgEndpoint != nil && nep.WgEndpoint.DstIPPort() == endpoint.DstIPPort() {
-			return link.ID, true
+			remoteMatches = append(remoteMatches, link)
+			continue
 		}
 		if ap, err := nep.DynEP.Get(); err == nil && ap == endpoint.DstIPPort() {
+			remoteMatches = append(remoteMatches, link)
+		}
+	}
+	for _, link := range remoteMatches {
+		if incomingMatchesLocalBind(link.Endpoint.AsNylonEndpoint(), endpoint) {
 			return link.ID, true
 		}
 	}
+	if len(remoteMatches) == 1 {
+		return remoteMatches[0].ID, true
+	}
 	return state.LinkID{}, false
+}
+
+type endpointWithSrcIfidx interface {
+	SrcIfidx() int32
+}
+
+func incomingMatchesLocalBind(nep *state.NylonEndpoint, endpoint conn.Endpoint) bool {
+	if nep == nil {
+		return false
+	}
+	bind := nep.Bind
+	if !bind.Source.IsValid() && bind.Interface == "" {
+		return true
+	}
+	if bind.Source.IsValid() && endpoint.SrcIP().IsValid() && endpoint.SrcIP() != bind.Source {
+		return false
+	}
+	if bind.Interface == "" {
+		return bind.Source.IsValid() && endpoint.SrcIP() == bind.Source
+	}
+	srcIfidx, ok := endpoint.(endpointWithSrcIfidx)
+	if !ok || srcIfidx.SrcIfidx() == 0 {
+		return bind.Source.IsValid() && endpoint.SrcIP() == bind.Source
+	}
+	iface, err := net.InterfaceByName(bind.Interface)
+	if err != nil {
+		return false
+	}
+	if int32(iface.Index) != srcIfidx.SrcIfidx() {
+		return false
+	}
+	return !bind.Source.IsValid() || endpoint.SrcIP() == netip.Addr{} || endpoint.SrcIP() == bind.Source
 }
 
 func handleProbe(n *Nylon, pkt *protocol.Ny_Probe, endpoint conn.Endpoint, peer *device.Peer, node state.NodeId) {
@@ -98,7 +142,8 @@ func handleProbe(n *Nylon, pkt *protocol.Ny_Probe, endpoint conn.Endpoint, peer 
 		// ping
 		// build pong response
 		res := pkt
-		res.ResponseToken = new(rand.Uint64())
+		responseToken := rand.Uint64()
+		res.ResponseToken = &responseToken
 
 		// send pong
 		err := n.SendNylon(&protocol.Ny{Type: &protocol.Ny_ProbeOp{ProbeOp: pkt}}, endpoint, peer)
@@ -167,6 +212,73 @@ func handleProbePong(n *Nylon, node state.NodeId, token uint64, ep conn.Endpoint
 		}
 	}
 	n.Log.Warn("probe came back and couldn't find link", "from", ep.DstToString(), "node", node)
+}
+
+func (n *Nylon) refreshDynamicEndpointLinks() {
+	for _, link := range n.RouterState.LinkList() {
+		nep := link.Endpoint.AsNylonEndpoint()
+		if nep == nil || nep.DynEP == nil {
+			continue
+		}
+		oldAP, oldErr := nep.DynEP.Get()
+		newAP, err := nep.DynEP.Refresh(n.EndpointResolveExpiry)
+		if err != nil {
+			n.Log.Debug("failed to resolve endpoint", "ep", nep.DynEP.Value, "err", err.Error())
+			continue
+		}
+		if oldErr == nil && oldAP != newAP {
+			n.rotateLinkGeneration(link.ID, oldAP, nep.DynEP.Clone())
+		}
+	}
+}
+
+func (n *Nylon) rotateLinkGeneration(oldID state.LinkID, oldAP netip.AddrPort, newDyn *state.DynamicEndpoint) {
+	rotate := func() error {
+		link := n.RouterState.GetLink(oldID)
+		if link == nil {
+			return nil
+		}
+		nep := link.Endpoint.AsNylonEndpoint()
+		if nep == nil {
+			return nil
+		}
+
+		oldDyn := state.NewDynamicEndpoint(oldAP.String())
+		if newDyn != nil {
+			oldDyn.ID = newDyn.ID
+		}
+		nep.DynEP = oldDyn
+
+		nextID := oldID
+		for {
+			nextID.Generation++
+			if n.RouterState.GetLink(nextID) == nil {
+				break
+			}
+		}
+		if newDyn == nil {
+			newDyn = nep.DynEP.Clone()
+		}
+		newEp := state.NewEndpoint(newDyn, nep.IsRemote(), nil, &n.RouterTunables)
+		newEp.LocalBind = nep.LocalBind
+		newEp.Bind = nep.Bind
+		newEp.Generation = nextID.Generation
+		n.RouterState.Links[nextID] = &state.Link{
+			ID:       nextID,
+			Peer:     oldID.Peer,
+			Endpoint: newEp,
+			Routes:   make(map[netip.Prefix]state.NeighRoute),
+		}
+		if neigh := n.RouterState.GetNeighbour(oldID.Peer); neigh != nil {
+			neigh.Eps = append(neigh.Eps, newEp)
+		}
+		return nil
+	}
+	if n.DispatchChannel == nil {
+		_ = rotate()
+		return
+	}
+	n.Dispatch(rotate)
 }
 
 func (n *Nylon) probeLinks(active bool) error {

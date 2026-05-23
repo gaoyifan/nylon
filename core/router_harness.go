@@ -88,8 +88,12 @@ func NewRouterEvent(eventType string, args ...any) RouterEvent {
 	return RouterEvent{Type: eventType, Args: args}
 }
 
-func AckRetract(neigh state.NodeId, prefix netip.Prefix) RouterEvent {
-	return NewRouterEvent(eventSendAckRetract, neigh, prefix)
+func AckRetract(neigh state.NodeId, prefix netip.Prefix, token ...uint64) RouterEvent {
+	args := []any{neigh, prefix}
+	if len(token) > 0 {
+		args = append(args, token[0])
+	}
+	return NewRouterEvent(eventSendAckRetract, args...)
 }
 
 func UpdateRoute(neigh state.NodeId, route state.PubRoute) RouterEvent {
@@ -130,8 +134,12 @@ func (h *RouterHarness) TableDeleteRoute(prefix netip.Prefix) {
 	h.tableActions = append(h.tableActions, TableDelete(prefix))
 }
 
-func (h *RouterHarness) SendAckRetract(link state.LinkID, prefix netip.Prefix) {
-	h.actions = append(h.actions, AckRetract(link.Peer, prefix))
+func (h *RouterHarness) SendAckRetract(link state.LinkID, prefix netip.Prefix, token uint64) {
+	if token == 0 {
+		h.actions = append(h.actions, AckRetract(link.Peer, prefix))
+		return
+	}
+	h.actions = append(h.actions, AckRetract(link.Peer, prefix, token))
 }
 
 func (h *RouterHarness) SendRouteUpdate(link state.LinkID, advRoute state.PubRoute) {
@@ -195,6 +203,14 @@ func (e HarnessEvents) contains(eventType string, args ...any) bool {
 				match := true
 				for i, arg := range args {
 					if !cmp.Equal(eventArgs[i], arg, cmpopts.EquateComparable(netip.Prefix{})) {
+						if actualRoute, ok := eventArgs[i].(state.PubRoute); ok {
+							if expectedRoute, ok := arg.(state.PubRoute); ok && expectedRoute.RetractionToken == 0 {
+								actualRoute.RetractionToken = 0
+								if cmp.Equal(actualRoute, expectedRoute, cmpopts.EquateComparable(netip.Prefix{})) {
+									continue
+								}
+							}
+						}
 						match = false
 						break
 					}

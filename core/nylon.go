@@ -199,19 +199,7 @@ func (n *Nylon) Init() error {
 		return n.probeLinks(true)
 	}, n.ProbeDelay)
 	n.RepeatTask(func() error {
-		// refresh dynamic endpoints
-		for _, neigh := range n.RouterState.Neighbours {
-			for _, ep := range neigh.Eps {
-				if nep, ok := ep.(*state.NylonEndpoint); ok {
-					go func() {
-						_, err := nep.DynEP.Refresh(n.EndpointResolveExpiry)
-						if err != nil {
-							n.Log.Debug("failed to resolve endpoint", "ep", nep.DynEP.Value, "err", err.Error())
-						}
-					}()
-				}
-			}
-		}
+		n.refreshDynamicEndpointLinks()
 		return nil
 	}, n.EndpointResolveDelay)
 	n.RepeatTask(func() error {

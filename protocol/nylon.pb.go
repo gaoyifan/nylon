@@ -180,13 +180,14 @@ func (*Ny_ProbeOp) isNy_Type() {}
 func (*Ny_AckRetractOp) isNy_Type() {}
 
 type Ny_Update struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RouterId      string                 `protobuf:"bytes,1,opt,name=RouterId,proto3" json:"RouterId,omitempty"`
-	Prefix        []byte                 `protobuf:"bytes,2,opt,name=Prefix,proto3" json:"Prefix,omitempty"`
-	Seqno         uint32                 `protobuf:"varint,3,opt,name=Seqno,proto3" json:"Seqno,omitempty"`
-	Metric        uint32                 `protobuf:"varint,4,opt,name=Metric,proto3" json:"Metric,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	RouterId        string                 `protobuf:"bytes,1,opt,name=RouterId,proto3" json:"RouterId,omitempty"`
+	Prefix          []byte                 `protobuf:"bytes,2,opt,name=Prefix,proto3" json:"Prefix,omitempty"`
+	Seqno           uint32                 `protobuf:"varint,3,opt,name=Seqno,proto3" json:"Seqno,omitempty"`
+	Metric          uint32                 `protobuf:"varint,4,opt,name=Metric,proto3" json:"Metric,omitempty"`
+	RetractionToken uint64                 `protobuf:"varint,5,opt,name=RetractionToken,proto3" json:"RetractionToken,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Ny_Update) Reset() {
@@ -247,9 +248,17 @@ func (x *Ny_Update) GetMetric() uint32 {
 	return 0
 }
 
+func (x *Ny_Update) GetRetractionToken() uint64 {
+	if x != nil {
+		return x.RetractionToken
+	}
+	return 0
+}
+
 type Ny_AckRetract struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Prefix        []byte                 `protobuf:"bytes,1,opt,name=Prefix,proto3" json:"Prefix,omitempty"`
+	Token         uint64                 `protobuf:"varint,2,opt,name=Token,proto3" json:"Token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -289,6 +298,13 @@ func (x *Ny_AckRetract) GetPrefix() []byte {
 		return x.Prefix
 	}
 	return nil
+}
+
+func (x *Ny_AckRetract) GetToken() uint64 {
+	if x != nil {
+		return x.Token
+	}
+	return 0
 }
 
 type Ny_SeqnoRequest struct {
@@ -417,20 +433,22 @@ const file_protocol_nylon_proto_rawDesc = "" +
 	"\n" +
 	"\x14protocol/nylon.proto\x12\x05proto\"6\n" +
 	"\x0fTransportBundle\x12#\n" +
-	"\aPackets\x18\x01 \x03(\v2\t.proto.NyR\aPackets\"\xc9\x04\n" +
+	"\aPackets\x18\x01 \x03(\v2\t.proto.NyR\aPackets\"\x8a\x05\n" +
 	"\x02Ny\x12,\n" +
 	"\aRouteOp\x18\x01 \x01(\v2\x10.proto.Ny.UpdateH\x00R\aRouteOp\x12@\n" +
 	"\x0eSeqnoRequestOp\x18\x02 \x01(\v2\x16.proto.Ny.SeqnoRequestH\x00R\x0eSeqnoRequestOp\x12+\n" +
 	"\aProbeOp\x18\x03 \x01(\v2\x0f.proto.Ny.ProbeH\x00R\aProbeOp\x12:\n" +
-	"\fAckRetractOp\x18\x04 \x01(\v2\x14.proto.Ny.AckRetractH\x00R\fAckRetractOp\x1aj\n" +
+	"\fAckRetractOp\x18\x04 \x01(\v2\x14.proto.Ny.AckRetractH\x00R\fAckRetractOp\x1a\x94\x01\n" +
 	"\x06Update\x12\x1a\n" +
 	"\bRouterId\x18\x01 \x01(\tR\bRouterId\x12\x16\n" +
 	"\x06Prefix\x18\x02 \x01(\fR\x06Prefix\x12\x14\n" +
 	"\x05Seqno\x18\x03 \x01(\rR\x05Seqno\x12\x16\n" +
-	"\x06Metric\x18\x04 \x01(\rR\x06Metric\x1a$\n" +
+	"\x06Metric\x18\x04 \x01(\rR\x06Metric\x12(\n" +
+	"\x0fRetractionToken\x18\x05 \x01(\x04R\x0fRetractionToken\x1a:\n" +
 	"\n" +
 	"AckRetract\x12\x16\n" +
-	"\x06Prefix\x18\x01 \x01(\fR\x06Prefix\x1at\n" +
+	"\x06Prefix\x18\x01 \x01(\fR\x06Prefix\x12\x14\n" +
+	"\x05Token\x18\x02 \x01(\x04R\x05Token\x1at\n" +
 	"\fSeqnoRequest\x12\x1a\n" +
 	"\bRouterId\x18\x01 \x01(\tR\bRouterId\x12\x16\n" +
 	"\x06Prefix\x18\x02 \x01(\fR\x06Prefix\x12\x14\n" +
