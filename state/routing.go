@@ -10,6 +10,25 @@ import (
 )
 
 type NodeId string
+type LocalBindID string
+type RemoteEndpointID string
+
+const DefaultLocalBindID LocalBindID = "default"
+
+type LinkID struct {
+	Peer           NodeId
+	LocalBind      LocalBindID
+	RemoteEndpoint RemoteEndpointID
+	Generation     uint64
+}
+
+func (id LinkID) String() string {
+	return fmt.Sprintf("%s/%s/%s/%d", id.Peer, id.LocalBind, id.RemoteEndpoint, id.Generation)
+}
+
+func (id LinkID) Less(other LinkID) bool {
+	return id.String() < other.String()
+}
 
 // Source is a pair of a router-id and a prefix (Babel Section 2.7).
 type Source struct {
@@ -37,10 +56,13 @@ type Advertisement struct {
 }
 type RouterState struct {
 	*RouterTunables
-	Id         NodeId
-	SelfSeqno  map[netip.Prefix]uint16
-	Routes     map[netip.Prefix]SelRoute
-	Sources    map[Source]FD
+	Id        NodeId
+	SelfSeqno map[netip.Prefix]uint16
+	Routes    map[netip.Prefix]SelRoute
+	Sources   map[Source]FD
+	// Links are routed adjacencies. Neighbours is retained as a peer-level
+	// compatibility view for older tests and status grouping.
+	Links      map[LinkID]*Link
 	Neighbours []*Neighbour
 	// Advertised is a map tracking the prefix and the time it will be advertised until
 	Advertised map[netip.Prefix]Advertisement
@@ -71,6 +93,13 @@ type Neighbour struct {
 	Id     NodeId
 	Routes map[netip.Prefix]NeighRoute
 	Eps    []Endpoint
+}
+
+type Link struct {
+	ID       LinkID
+	Peer     NodeId
+	Endpoint Endpoint
+	Routes   map[netip.Prefix]NeighRoute
 }
 
 type FD struct {
@@ -114,9 +143,10 @@ type NeighRoute struct {
 
 type SelRoute struct {
 	PubRoute
+	NhLink      LinkID
 	Nh          NodeId    // next hop node
 	ExpireAt    time.Time // when the route expires
-	RetractedBy []NodeId
+	RetractedBy []LinkID
 }
 
 func (r SelRoute) String() string {
@@ -141,4 +171,149 @@ func (s *RouterState) GetNeighbour(node NodeId) *Neighbour {
 		return nil
 	}
 	return s.Neighbours[nIdx]
+}
+
+func (s *RouterState) EnsureLinkState() {
+	if s.Links == nil {
+		s.Links = make(map[LinkID]*Link)
+	}
+	for _, neigh := range s.Neighbours {
+		if neigh.Routes == nil {
+			neigh.Routes = make(map[netip.Prefix]NeighRoute)
+		}
+		for idx, ep := range neigh.Eps {
+			id := endpointLinkID(neigh.Id, ep, idx)
+			if _, ok := s.Links[id]; ok {
+				continue
+			}
+			s.Links[id] = &Link{
+				ID:       id,
+				Peer:     neigh.Id,
+				Endpoint: ep,
+				Routes:   neigh.Routes,
+			}
+		}
+	}
+}
+
+func endpointLinkID(peer NodeId, ep Endpoint, idx int) LinkID {
+	remoteID := RemoteEndpointID(fmt.Sprintf("ep-%d", idx))
+	localBind := DefaultLocalBindID
+	generation := uint64(0)
+	if nep := ep.AsNylonEndpoint(); nep != nil {
+		remoteID = nep.RemoteEndpointID()
+		if nep.LocalBind != "" {
+			localBind = nep.LocalBind
+		}
+		generation = nep.Generation
+	}
+	return LinkID{
+		Peer:           peer,
+		LocalBind:      localBind,
+		RemoteEndpoint: remoteID,
+		Generation:     generation,
+	}
+}
+
+func (s *RouterState) AddLink(peer NodeId, ep Endpoint) *Link {
+	s.EnsureLinkState()
+	linksForPeer := s.GetPeerLinks(peer)
+	id := endpointLinkID(peer, ep, len(linksForPeer))
+	for _, link := range linksForPeer {
+		if link.ID == id {
+			link.Endpoint = ep
+			return link
+		}
+	}
+	link := &Link{
+		ID:       id,
+		Peer:     peer,
+		Endpoint: ep,
+		Routes:   make(map[netip.Prefix]NeighRoute),
+	}
+	s.Links[id] = link
+	neigh := s.GetNeighbour(peer)
+	if neigh == nil {
+		neigh = &Neighbour{Id: peer, Routes: make(map[netip.Prefix]NeighRoute)}
+		s.Neighbours = append(s.Neighbours, neigh)
+	}
+	neigh.Eps = append(neigh.Eps, ep)
+	if len(neigh.Eps) == 1 {
+		neigh.Routes = link.Routes
+	}
+	return link
+}
+
+func (s *RouterState) RemoveLink(id LinkID) {
+	s.EnsureLinkState()
+	delete(s.Links, id)
+	if neigh := s.GetNeighbour(id.Peer); neigh != nil {
+		for i, ep := range neigh.Eps {
+			if endpointLinkID(id.Peer, ep, i) == id {
+				neigh.Eps = append(neigh.Eps[:i], neigh.Eps[i+1:]...)
+				break
+			}
+		}
+	}
+}
+
+func (s *RouterState) GetLink(id LinkID) *Link {
+	s.EnsureLinkState()
+	return s.Links[id]
+}
+
+func (s *RouterState) GetLinkForEndpoint(peer NodeId, ep Endpoint) *Link {
+	s.EnsureLinkState()
+	for _, link := range s.GetPeerLinks(peer) {
+		if link.Endpoint == ep {
+			return link
+		}
+	}
+	return nil
+}
+
+func (s *RouterState) GetPeerLinks(peer NodeId) []*Link {
+	s.EnsureLinkState()
+	links := make([]*Link, 0)
+	for _, link := range s.Links {
+		if link.Peer == peer {
+			links = append(links, link)
+		}
+	}
+	slices.SortFunc(links, func(a, b *Link) int {
+		if a.ID.Less(b.ID) {
+			return -1
+		}
+		if b.ID.Less(a.ID) {
+			return 1
+		}
+		return 0
+	})
+	return links
+}
+
+func (s *RouterState) GetDefaultLink(peer NodeId) *Link {
+	links := s.GetPeerLinks(peer)
+	if len(links) == 0 {
+		return nil
+	}
+	return links[0]
+}
+
+func (s *RouterState) LinkList() []*Link {
+	s.EnsureLinkState()
+	links := make([]*Link, 0, len(s.Links))
+	for _, link := range s.Links {
+		links = append(links, link)
+	}
+	slices.SortFunc(links, func(a, b *Link) int {
+		if a.ID.Less(b.ID) {
+			return -1
+		}
+		if b.ID.Less(a.ID) {
+			return 1
+		}
+		return 0
+	})
+	return links
 }

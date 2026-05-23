@@ -14,10 +14,10 @@ import (
 
 // Router is an interface that defines the underlying router operations
 type Router interface {
-	SendRouteUpdate(neigh state.NodeId, advRoute state.PubRoute)
-	SendAckRetract(neigh state.NodeId, prefix netip.Prefix)
+	SendRouteUpdate(link state.LinkID, advRoute state.PubRoute)
+	SendAckRetract(link state.LinkID, prefix netip.Prefix)
 	BroadcastSendRouteUpdate(advRoute state.PubRoute)
-	RequestSeqno(neigh state.NodeId, src state.Source, seqno uint16, hopCnt uint8)
+	RequestSeqno(link state.LinkID, src state.Source, seqno uint16, hopCnt uint8)
 	BroadcastRequestSeqno(src state.Source, seqno uint16, hopCnt uint8)
 	TableInsertRoute(prefix netip.Prefix, route state.SelRoute)
 	TableDeleteRoute(prefix netip.Prefix)
@@ -89,13 +89,19 @@ func FullTableUpdate(s *state.RouterState, r Router) {
 	}
 }
 
-func PushFullTable(s *state.RouterState, r Router, neigh state.NodeId) {
+func PushFullTable(s *state.RouterState, r Router, link state.LinkID) {
 	// send a full table update to one neighbour
 	for _, route := range s.Routes {
 		if route.Metric != state.INF {
 			updateFeasibility(s, route.PubRoute)
 		}
-		r.SendRouteUpdate(neigh, route.PubRoute)
+		r.SendRouteUpdate(link, route.PubRoute)
+	}
+}
+
+func PushFullTableToPeer(s *state.RouterState, r Router, peer state.NodeId) {
+	for _, link := range s.GetPeerLinks(peer) {
+		PushFullTable(s, r, link.ID)
 	}
 }
 
@@ -108,19 +114,19 @@ func RunGC(s *state.RouterState, r Router) {
 	//   already infinite, the route is flushed from the route table.
 
 	// scan neighbour routes for expiry
-	for _, neigh := range s.Neighbours {
-		for prefix, route := range neigh.Routes {
+	for _, link := range s.LinkList() {
+		for prefix, route := range link.Routes {
 			if now.After(route.ExpireAt) {
 				if route.Metric == state.INF {
 					// route expired and is INF, delete it
-					delete(neigh.Routes, prefix)
-					r.RouterEvent(log.EventRouteExpired, "expired and removed", "neigh", neigh.Id, "prefix", prefix)
+					delete(link.Routes, prefix)
+					r.RouterEvent(log.EventRouteExpired, "expired and removed", "link", link.ID, "prefix", prefix)
 				} else {
 					// route expired, set metric to INF
 					route.Metric = state.INF
 					route.ExpireAt = time.Now().Add(s.RouteExpiryTime) // reset expiry time
-					neigh.Routes[prefix] = route                       // update the route
-					r.RouterEvent(log.EventRouteExpired, "expired and marked", "neigh", neigh.Id, "prefix", prefix)
+					link.Routes[prefix] = route                        // update the route
+					r.RouterEvent(log.EventRouteExpired, "expired and marked", "link", link.ID, "prefix", prefix)
 				}
 			}
 		}
@@ -142,8 +148,8 @@ func RunGC(s *state.RouterState, r Router) {
 	// if no route table contains a source, remove it from the source table
 	for src := range s.Sources {
 		found := false
-		for _, neigh := range s.Neighbours {
-			if nSrc, ok := neigh.Routes[src.Prefix]; ok && nSrc.Source == src {
+		for _, link := range s.LinkList() {
+			if nSrc, ok := link.Routes[src.Prefix]; ok && nSrc.Source == src {
 				found = true
 				break
 			}
@@ -175,6 +181,14 @@ func retract(s *state.RouterState, r Router, prefix netip.Prefix) {
 }
 
 func HandleSeqnoRequest(s *state.RouterState, r Router, fromNeigh state.NodeId, src state.Source, reqSeqno uint16, hopCnt uint8) {
+	fromLink := s.GetDefaultLink(fromNeigh)
+	if fromLink == nil {
+		return
+	}
+	HandleLinkSeqnoRequest(s, r, fromLink.ID, src, reqSeqno, hopCnt)
+}
+
+func HandleLinkSeqnoRequest(s *state.RouterState, r Router, fromLinkID state.LinkID, src state.Source, reqSeqno uint16, hopCnt uint8) {
 	// 3.8.1.2.  Seqno Requests
 	//
 	//   When a node receives a seqno request for a given router-id and
@@ -190,7 +204,7 @@ func HandleSeqnoRequest(s *state.RouterState, r Router, fromNeigh state.NodeId, 
 		if selRoute.Metric != state.INF &&
 			(selRoute.Source.NodeId != src.NodeId || selRoute.Source.NodeId == src.NodeId && SeqnoGe(selRoute.FD.Seqno, reqSeqno)) {
 			updateFeasibility(s, selRoute.PubRoute)
-			r.SendRouteUpdate(fromNeigh, selRoute.PubRoute)
+			r.SendRouteUpdate(fromLinkID, selRoute.PubRoute)
 		}
 		//   If the router-ids match, but the requested seqno is larger (modulo 2^(16)) than the
 		//   route entry's, the node compares the router-id against its own
@@ -216,31 +230,31 @@ func HandleSeqnoRequest(s *state.RouterState, r Router, fromNeigh state.NodeId, 
 
 				_, isAdv := s.Routes[src.Prefix]
 				if hopCnt >= 2 && isAdv {
-					var nh *state.NodeId
-					if NeighContainsFunc(s, func(neigh state.NodeId, route state.NeighRoute) bool {
+					var nh *state.LinkID
+					if LinkContainsFunc(s, func(link state.LinkID, route state.NeighRoute) bool {
 						//   *  if the node has one or more feasible routes towards the requested
 						//      prefix with a next hop that is not the requesting node, then the
 						//      node MUST forward the request to the next hop of one such route;
-						n := s.GetNeighbour(neigh)
-						if n == nil || n.BestEndpoint() == nil {
+						l := s.GetLink(link)
+						if l == nil || l.Endpoint == nil || !l.Endpoint.IsActive() {
 							return false
 						}
-						if src.Prefix == route.Prefix && neigh != fromNeigh && route.Metric != state.INF && checkFeasibility(s, route.PubRoute) {
-							nh = &neigh
+						if route.Source == src && link != fromLinkID && route.Metric != state.INF && checkFeasibility(s, route.PubRoute) {
+							nh = &link
 							return true // found a feasible route
 						}
 						return false // not feasible
-					}) || NeighContainsFunc(s, func(neigh state.NodeId, route state.NeighRoute) bool {
+					}) || LinkContainsFunc(s, func(link state.LinkID, route state.NeighRoute) bool {
 						//   *  otherwise, if the node has one or more (not feasible) routes to
 						//      the requested prefix with a next hop that is not the requesting
 						//      node, then the node SHOULD forward the request to the next hop of
 						//      one such route.
-						n := s.GetNeighbour(neigh)
-						if n == nil || n.BestEndpoint() == nil {
+						l := s.GetLink(link)
+						if l == nil || l.Endpoint == nil || !l.Endpoint.IsActive() {
 							return false
 						}
-						if src.Prefix == route.Prefix && neigh != fromNeigh && route.Metric != state.INF {
-							nh = &neigh
+						if route.Source == src && link != fromLinkID && route.Metric != state.INF {
+							nh = &link
 							return true // found a route
 						}
 						return false // not found
@@ -261,6 +275,14 @@ func HandleSeqnoRequest(s *state.RouterState, r Router, fromNeigh state.NodeId, 
 }
 
 func HandleAckRetract(s *state.RouterState, r Router, neighId state.NodeId, prefix netip.Prefix) {
+	link := s.GetDefaultLink(neighId)
+	if link == nil {
+		return
+	}
+	HandleLinkAckRetract(s, r, link.ID, prefix)
+}
+
+func HandleLinkAckRetract(s *state.RouterState, r Router, linkID state.LinkID, prefix netip.Prefix) {
 	rt, ok := s.Routes[prefix]
 	if !ok {
 		r.RouterEvent(log.EventInconsistentState, "attempted to ack the retraction of a non-existent route", "prefix", prefix)
@@ -269,8 +291,8 @@ func HandleAckRetract(s *state.RouterState, r Router, neighId state.NodeId, pref
 	if rt.Metric != state.INF {
 		return // retraction ACKs only apply to held routes
 	}
-	if !slices.Contains(rt.RetractedBy, neighId) {
-		rt.RetractedBy = append(rt.RetractedBy, neighId)
+	if !slices.Contains(rt.RetractedBy, linkID) {
+		rt.RetractedBy = append(rt.RetractedBy, linkID)
 		s.Routes[prefix] = rt // update the route table
 		// recompute routes
 		ComputeRoutes(s, r)
@@ -279,18 +301,29 @@ func HandleAckRetract(s *state.RouterState, r Router, neighId state.NodeId, pref
 
 // this function should also be called on every probe
 func HandleNeighbourUpdate(s *state.RouterState, r Router, neighId state.NodeId, adv state.PubRoute) {
+	link := s.GetDefaultLink(neighId)
+	if link == nil {
+		return
+	}
+	HandleLinkUpdate(s, r, link.ID, adv)
+}
+
+func HandleLinkUpdate(s *state.RouterState, r Router, linkID state.LinkID, adv state.PubRoute) {
 	// 	 3.5.3.  Route Acquisition
 	//
 	//   When a Babel node receives an update (prefix, plen, router-id, seqno,
 	//   metric) from a neighbour neigh, it checks whether it already has a
 	//   route table entry indexed by (prefix, plen, neigh).
 
-	n := s.GetNeighbour(neighId)
+	link := s.GetLink(linkID)
+	if link == nil {
+		return
+	}
 
-	_, ok := n.Routes[adv.Prefix]
+	_, ok := link.Routes[adv.Prefix]
 
 	if adv.Metric == state.INF {
-		r.SendAckRetract(neighId, adv.Source.Prefix)
+		r.SendAckRetract(linkID, adv.Source.Prefix)
 	}
 
 	if !ok {
@@ -315,7 +348,7 @@ func HandleNeighbourUpdate(s *state.RouterState, r Router, neighId state.NodeId,
 		//      metric carried by the update.
 
 		// create the route
-		n.Routes[adv.Prefix] = state.NeighRoute{
+		link.Routes[adv.Prefix] = state.NeighRoute{
 			PubRoute: adv,
 			ExpireAt: time.Now().Add(s.RouteExpiryTime),
 		}
@@ -327,16 +360,16 @@ func HandleNeighbourUpdate(s *state.RouterState, r Router, neighId state.NodeId,
 		//      entry, then the update MAY be ignored;
 
 		selRoute, hasSelected := s.Routes[adv.Source.Prefix]
-		isSelected := hasSelected && selRoute.Nh == neighId && selRoute.Source == adv.Source
+		isSelected := hasSelected && selRoute.NhLink == linkID && selRoute.Source == adv.Source
 		if !checkFeasibility(s, adv) {
 			dummy := state.SelRoute{
 				PubRoute: adv,
-				Nh:       neighId,
+				NhLink:   linkID,
+				Nh:       link.Peer,
 				ExpireAt: time.Time{},
 			}
-			bestEp := n.BestEndpoint()
-			if bestEp != nil {
-				dummy.Metric = AddMetric(dummy.Metric, AddMetric(bestEp.Metric(), s.HopCost))
+			if link.Endpoint != nil && link.Endpoint.IsActive() {
+				dummy.Metric = AddMetric(dummy.Metric, AddMetric(link.Endpoint.Metric(), s.HopCost))
 			} else {
 				dummy.Metric = state.INF
 			}
@@ -348,7 +381,7 @@ func HandleNeighbourUpdate(s *state.RouterState, r Router, neighId state.NodeId,
 				//   receives an unfeasible update for a route that is currently selected.
 				//   The requested sequence number is computed from the source table as in
 				//   Section 3.8.2.1.
-				r.RequestSeqno(neighId, adv.Source, s.Sources[adv.Source].Seqno+1, s.SeqnoRequestHopCount)
+				r.RequestSeqno(linkID, adv.Source, s.Sources[adv.Source].Seqno+1, s.SeqnoRequestHopCount)
 				return // ignore the unfeasible update, we are conservative with retractions here
 			} else if isMoreOptimal {
 				//   Additionally, since metric computation does not necessarily coincide
@@ -357,7 +390,7 @@ func HandleNeighbourUpdate(s *state.RouterState, r Router, neighId state.NodeId,
 				//   lead to the received route becoming selected were it feasible. In that
 				//   case, the node SHOULD send a unicast seqno request to the neighbour
 				//   that advertised the preferable update.
-				r.RequestSeqno(neighId, adv.Source, s.Sources[adv.Source].Seqno+1, s.SeqnoRequestHopCount)
+				r.RequestSeqno(linkID, adv.Source, s.Sources[adv.Source].Seqno+1, s.SeqnoRequestHopCount)
 			}
 		}
 
@@ -371,13 +404,13 @@ func HandleNeighbourUpdate(s *state.RouterState, r Router, neighId state.NodeId,
 		//      update (possibly a retraction) MUST be sent in a timely manner as
 		//      described in Section 3.7.2.
 
-		nr := n.Routes[adv.Prefix]
+		nr := link.Routes[adv.Prefix]
 		nr.PubRoute = adv
 
 		if adv.Metric != state.INF {
 			nr.ExpireAt = time.Now().Add(s.RouteExpiryTime)
 		}
-		n.Routes[adv.Prefix] = nr
+		link.Routes[adv.Prefix] = nr
 	}
 }
 
@@ -385,16 +418,16 @@ func isHeldRoute(s *state.RouterState, route state.SelRoute) bool {
 	if route.Nh == s.Id {
 		return false // we do not hold routes to ourselves
 	}
-	connectedNeighs := 0
-	for _, neigh := range s.Neighbours {
-		if neigh.BestEndpoint() != nil {
-			connectedNeighs++
+	connectedLinks := 0
+	for _, link := range s.LinkList() {
+		if link.Endpoint != nil && link.Endpoint.IsActive() {
+			connectedLinks++
 		}
 	}
-	neigh := s.GetNeighbour(route.Nh)
-	hasLink := neigh != nil && neigh.BestEndpoint() != nil
+	nhLink := s.GetLink(route.NhLink)
+	hasLink := nhLink != nil && nhLink.Endpoint != nil && nhLink.Endpoint.IsActive()
 	return (route.Metric == state.INF || !hasLink) &&
-		len(route.RetractedBy) < connectedNeighs &&
+		len(route.RetractedBy) < connectedLinks &&
 		route.ExpireAt.After(time.Now())
 }
 
@@ -490,11 +523,10 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 	//   holes if the metric being used is not left-distributive
 	//   (Section 3.5.2).
 
-	// enumerate through neighbours
-	for _, neigh := range s.Neighbours {
-		bestEp := neigh.BestEndpoint()
-		if bestEp == nil {
-			r.RouterEvent(log.EventNoEndpointToNeigh, "no endpoint to neighbour", "neigh", neigh.Id)
+	// enumerate through routed links
+	for _, link := range s.LinkList() {
+		if link.Endpoint == nil || !link.Endpoint.IsActive() {
+			r.RouterEvent(log.EventNoEndpointToNeigh, "no endpoint to link", "link", link.ID)
 		}
 
 		// We refer to our current node as A, our neighbour as B, and S as our source.
@@ -502,13 +534,13 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 		// Cost(A, B)
 		CAB := state.INF
 
-		if bestEp != nil {
-			CAB = bestEp.Metric()
+		if link.Endpoint != nil && link.Endpoint.IsActive() {
+			CAB = link.Endpoint.Metric()
 			CAB = AddMetric(CAB, s.HopCost) // to prevent 0 cost metric
 		}
 
 		// enumerate through neighbour advertisements
-		for prefix, adv := range neigh.Routes {
+		for prefix, adv := range link.Routes {
 			// Cost(A, B) + Cost(S, B)
 			totalCost := AddMetric(CAB, adv.Metric)
 
@@ -529,9 +561,10 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 					Source: adv.Source,
 					FD:     fd,
 				},
-				Nh:          neigh.Id,
+				NhLink:      link.ID,
+				Nh:          link.Peer,
 				ExpireAt:    adv.ExpireAt,
-				RetractedBy: []state.NodeId{},
+				RetractedBy: []state.LinkID{},
 			}
 
 			//   *  an unfeasible route is never selected.
@@ -541,7 +574,7 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 
 			// Refresh the current winner for this recomputation. This keeps a
 			// selected next hop selected even when its metric worsens.
-			if exists && oldRoute.Nh == newRoute.Nh {
+			if exists && oldRoute.NhLink == newRoute.NhLink {
 				newTable[prefix] = newRoute
 				continue
 			}
@@ -577,7 +610,7 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 		if !exists || oldRoute.Metric == state.INF && newRoute.Metric != state.INF {
 			r.TableInsertRoute(prefix, newRoute)
 			r.RouterEvent(log.EventRouteInserted, "inserted", "prefix", prefix, "new", newRoute)
-		} else if oldRoute.Nh != newRoute.Nh {
+		} else if oldRoute.NhLink != newRoute.NhLink || oldRoute.Nh != newRoute.Nh {
 			r.TableInsertRoute(prefix, newRoute)
 			r.RouterEvent(log.EventRouteUpdated, "updated", "prefix", prefix, "old", oldRoute, "new", newRoute)
 		}
@@ -628,11 +661,11 @@ func SolveStarvation(router *state.RouterState, r Router) {
 
 	isFeasible := make(map[state.Source]bool)
 
-	for _, neigh := range router.Neighbours {
-		if neigh.BestEndpoint() == nil {
-			continue // no endpoint to this neighbour
+	for _, link := range router.LinkList() {
+		if link.Endpoint == nil || !link.Endpoint.IsActive() {
+			continue // no endpoint to this link
 		}
-		for _, route := range neigh.Routes {
+		for _, route := range link.Routes {
 			curFeasible, present := isFeasible[route.Source]
 			routeFeasible := route.Metric != state.INF && checkFeasibility(router, route.PubRoute)
 			isFeasible[route.Source] = (present && curFeasible) || routeFeasible
@@ -686,5 +719,5 @@ func IsStrictlyBetter(curRoute state.SelRoute, newRoute state.SelRoute) bool {
 }
 
 func sameRoute(a state.SelRoute, b state.SelRoute) bool {
-	return a.Nh == b.Nh && a.Source == b.Source
+	return a.NhLink == b.NhLink && a.Nh == b.Nh && a.Source == b.Source
 }

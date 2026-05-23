@@ -357,7 +357,7 @@ func neighRouteProto(route state.NeighRoute) *protocol.NeighRoute {
 func selRouteProto(route state.SelRoute) *protocol.SelRoute {
 	retractedBy := make([]string, 0, len(route.RetractedBy))
 	for _, id := range route.RetractedBy {
-		retractedBy = append(retractedBy, string(id))
+		retractedBy = append(retractedBy, id.String())
 	}
 	slices.Sort(retractedBy)
 	return &protocol.SelRoute{

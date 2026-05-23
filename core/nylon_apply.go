@@ -62,15 +62,45 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 	}
 
 	neighs := make([]*state.Neighbour, 0, len(desired))
+	nextLinks := make(map[state.LinkID]*state.Link)
 	for _, neigh := range n.RouterState.Neighbours {
 		cfg, ok := desired[neigh.Id]
 		if !ok {
 			// remove old neighbours
-			delete(n.router.IO, neigh.Id)
+			for _, link := range n.RouterState.GetPeerLinks(neigh.Id) {
+				delete(n.router.IO, link.ID)
+			}
 			continue
 		}
 		// configure existing neighbours
-		reconcileConfiguredEndpoints(neigh, cfg.Endpoints, &n.RouterTunables)
+		reconcileConfiguredEndpoints(neigh, cfg.Endpoints, n.LocalCfg.NormalizedBinds(), &n.RouterTunables)
+		for idx, ep := range neigh.Eps {
+			link := n.RouterState.GetLinkForEndpoint(neigh.Id, ep)
+			if link == nil {
+				nep := ep.AsNylonEndpoint()
+				localBind := nep.LocalBind
+				if localBind == "" {
+					localBind = state.DefaultLocalBindID
+					nep.LocalBind = localBind
+				}
+				for _, bind := range n.LocalCfg.NormalizedBinds() {
+					if bind.ID == localBind {
+						nep.Bind = bind
+						break
+					}
+				}
+				link = &state.Link{
+					ID:       state.LinkID{Peer: neigh.Id, LocalBind: localBind, RemoteEndpoint: nep.RemoteEndpointID(), Generation: nep.Generation},
+					Peer:     neigh.Id,
+					Endpoint: ep,
+					Routes:   make(map[netip.Prefix]state.NeighRoute),
+				}
+				if idx == 0 {
+					neigh.Routes = link.Routes
+				}
+			}
+			nextLinks[link.ID] = link
+		}
 		neighs = append(neighs, neigh)
 		delete(desired, neigh.Id)
 	}
@@ -88,12 +118,32 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 			Routes: make(map[netip.Prefix]state.NeighRoute),
 			Eps:    make([]state.Endpoint, 0, len(cfg.Endpoints)),
 		}
-		for _, ep := range cfg.Endpoints {
-			stNeigh.Eps = append(stNeigh.Eps, state.NewEndpoint(ep, false, nil, &n.RouterTunables))
+		for _, bind := range n.LocalCfg.NormalizedBinds() {
+			for _, ep := range cfg.Endpoints {
+				nep := state.NewEndpoint(ep, false, nil, &n.RouterTunables)
+				nep.LocalBind = bind.ID
+				nep.Bind = bind
+				stNeigh.Eps = append(stNeigh.Eps, nep)
+				link := &state.Link{
+					ID: state.LinkID{
+						Peer:           id,
+						LocalBind:      bind.ID,
+						RemoteEndpoint: nep.RemoteEndpointID(),
+					},
+					Peer:     id,
+					Endpoint: nep,
+					Routes:   make(map[netip.Prefix]state.NeighRoute),
+				}
+				if len(stNeigh.Eps) == 1 {
+					stNeigh.Routes = link.Routes
+				}
+				nextLinks[link.ID] = link
+			}
 		}
 		neighs = append(neighs, stNeigh)
 	}
 	n.RouterState.Neighbours = neighs
+	n.RouterState.Links = nextLinks
 
 	// rebuild pubkey to peer's id mapping
 	pubkeyMap := make(map[state.NyPublicKey]state.NodeId)
@@ -107,14 +157,14 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 	return nil
 }
 
-func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.DynamicEndpoint, t *state.RouterTunables) {
+func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.DynamicEndpoint, binds []state.LocalBind, t *state.RouterTunables) {
 	desiredByValue := make(map[string]*state.DynamicEndpoint, len(desired))
 	for _, ep := range desired {
 		desiredByValue[ep.Value] = ep
 	}
 
 	eps := make([]state.Endpoint, 0, len(neigh.Eps)+len(desired))
-	seen := make(map[string]struct{}, len(desired))
+	seen := make(map[state.LinkID]struct{}, len(desired)*len(binds))
 	for _, ep := range neigh.Eps {
 		nep := ep.AsNylonEndpoint()
 		if ep.IsRemote() {
@@ -122,16 +172,37 @@ func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.Dynam
 			continue
 		}
 		// only keep if desired
-		if desiredEp, ok := desiredByValue[nep.DynEP.Value]; ok {
+		if _, ok := desiredByValue[nep.DynEP.Value]; ok {
+			localBind := nep.LocalBind
+			if localBind == "" {
+				localBind = state.DefaultLocalBindID
+				nep.LocalBind = localBind
+			}
+			for _, bind := range binds {
+				if bind.ID == localBind {
+					nep.Bind = bind
+					break
+				}
+			}
+			id := state.LinkID{Peer: neigh.Id, LocalBind: localBind, RemoteEndpoint: nep.RemoteEndpointID(), Generation: nep.Generation}
 			eps = append(eps, ep)
-			seen[desiredEp.Value] = struct{}{}
+			seen[id] = struct{}{}
 		}
 	}
-	for _, ep := range desired {
-		if _, ok := seen[ep.Value]; ok {
-			continue
+	for _, bind := range binds {
+		for _, ep := range desired {
+			id := state.LinkID{Peer: neigh.Id, LocalBind: bind.ID, RemoteEndpoint: ep.ID}
+			if id.RemoteEndpoint == "" {
+				id.RemoteEndpoint = state.RemoteEndpointID(ep.Value)
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			nep := state.NewEndpoint(ep, false, nil, t)
+			nep.LocalBind = bind.ID
+			nep.Bind = bind
+			eps = append(eps, nep)
 		}
-		eps = append(eps, state.NewEndpoint(ep, false, nil, t))
 	}
 	neigh.Eps = eps
 }

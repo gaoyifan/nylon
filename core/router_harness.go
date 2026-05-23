@@ -130,20 +130,20 @@ func (h *RouterHarness) TableDeleteRoute(prefix netip.Prefix) {
 	h.tableActions = append(h.tableActions, TableDelete(prefix))
 }
 
-func (h *RouterHarness) SendAckRetract(neigh state.NodeId, prefix netip.Prefix) {
-	h.actions = append(h.actions, AckRetract(neigh, prefix))
+func (h *RouterHarness) SendAckRetract(link state.LinkID, prefix netip.Prefix) {
+	h.actions = append(h.actions, AckRetract(link.Peer, prefix))
 }
 
-func (h *RouterHarness) SendRouteUpdate(neigh state.NodeId, advRoute state.PubRoute) {
-	h.actions = append(h.actions, UpdateRoute(neigh, advRoute))
+func (h *RouterHarness) SendRouteUpdate(link state.LinkID, advRoute state.PubRoute) {
+	h.actions = append(h.actions, UpdateRoute(link.Peer, advRoute))
 }
 
 func (h *RouterHarness) BroadcastSendRouteUpdate(advRoute state.PubRoute) {
 	h.actions = append(h.actions, BroadcastUpdateRoute(advRoute))
 }
 
-func (h *RouterHarness) RequestSeqno(neigh state.NodeId, src state.Source, seqno uint16, hopCnt uint8) {
-	h.actions = append(h.actions, RequestSeqno(neigh, src, seqno, hopCnt))
+func (h *RouterHarness) RequestSeqno(link state.LinkID, src state.Source, seqno uint16, hopCnt uint8) {
+	h.actions = append(h.actions, RequestSeqno(link.Peer, src, seqno, hopCnt))
 }
 
 func (h *RouterHarness) BroadcastRequestSeqno(src state.Source, seqno uint16, hopCnt uint8) {
@@ -253,6 +253,10 @@ func MakeNeighbours(ids ...state.NodeId) []*state.Neighbour {
 	return neighs
 }
 
+func DefaultLink(peer state.NodeId) state.LinkID {
+	return state.LinkID{Peer: peer, LocalBind: state.DefaultLocalBindID, RemoteEndpoint: "mock"}
+}
+
 func MakePubRoute(nodeId state.NodeId, prefix netip.Prefix, seqno uint16, metric uint32) state.PubRoute {
 	return state.PubRoute{
 		Source: state.Source{
@@ -267,25 +271,13 @@ func MakePubRoute(nodeId state.NodeId, prefix netip.Prefix, seqno uint16, metric
 }
 
 func AddLink(r *state.RouterState, ep *MockEndpoint) *MockEndpoint {
-	for _, n := range r.Neighbours {
-		if n.Id == ep.Node() {
-			n.Eps = append(n.Eps, ep)
-			return ep
-		}
-	}
-	return nil
+	r.AddLink(ep.Node(), ep)
+	return ep
 }
 
 func RemoveLink(r *state.RouterState, ep *MockEndpoint) {
-	for _, n := range r.Neighbours {
-		if n.Id == ep.Node() {
-			for i, e := range n.Eps {
-				if e == ep {
-					n.Eps = append(n.Eps[:i], n.Eps[i+1:]...)
-					return
-				}
-			}
-		}
+	if link := r.GetLinkForEndpoint(ep.Node(), ep); link != nil {
+		r.RemoveLink(link.ID)
 	}
 }
 

@@ -14,3 +14,14 @@ func NeighContainsFunc(s *state.RouterState, f func(neigh state.NodeId, route st
 	}
 	return false
 }
+
+func LinkContainsFunc(s *state.RouterState, f func(link state.LinkID, route state.NeighRoute) bool) bool {
+	for _, link := range s.LinkList() {
+		for _, r := range link.Routes {
+			if f(link.ID, r) {
+				return true
+			}
+		}
+	}
+	return false
+}

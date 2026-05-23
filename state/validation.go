@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"runtime"
 	"slices"
 )
 
@@ -41,6 +42,19 @@ func NodeConfigValidator(central *CentralCfg, node *LocalCfg) error {
 		_, err := url.Parse(node.Dist.Url)
 		if err != nil {
 			return err
+		}
+	}
+	seenBinds := make(map[LocalBindID]struct{})
+	for _, bind := range node.Binds {
+		if bind.ID == "" {
+			return fmt.Errorf("bind id must not be empty")
+		}
+		if _, ok := seenBinds[bind.ID]; ok {
+			return fmt.Errorf("duplicate bind id %s", bind.ID)
+		}
+		seenBinds[bind.ID] = struct{}{}
+		if runtime.GOOS != "linux" && bind.ID != DefaultLocalBindID {
+			return fmt.Errorf("explicit local binds are only supported on linux")
 		}
 	}
 	if len(node.DnsResolvers) != 0 {
@@ -85,6 +99,26 @@ func CentralConfigValidator(cfg *CentralCfg) error {
 			return fmt.Errorf("duplicate router id %s", node.Id)
 		}
 		nodes = append(nodes, string(node.Id))
+		endpointIDs := make(map[RemoteEndpointID]struct{})
+		endpointValues := make(map[string]struct{})
+		for _, ep := range node.Endpoints {
+			if ep == nil {
+				return fmt.Errorf("router %s has nil endpoint", node.Id)
+			}
+			if ep.Value == "" {
+				return fmt.Errorf("router %s has empty endpoint address", node.Id)
+			}
+			if ep.ID != "" {
+				if _, ok := endpointIDs[ep.ID]; ok {
+					return fmt.Errorf("router %s has duplicate endpoint id %s", node.Id, ep.ID)
+				}
+				endpointIDs[ep.ID] = struct{}{}
+			}
+			if _, ok := endpointValues[ep.Value]; ok {
+				return fmt.Errorf("router %s has duplicate endpoint address %s", node.Id, ep.Value)
+			}
+			endpointValues[ep.Value] = struct{}{}
+		}
 	}
 	for _, node := range cfg.Clients {
 		err := NameValidator(string(node.Id))
