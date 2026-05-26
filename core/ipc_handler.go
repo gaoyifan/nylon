@@ -188,7 +188,7 @@ func buildNeighbours(n *Nylon, wgStats map[state.NyPublicKey]device.PeerStatus) 
 		routes := make([]*protocol.NeighRoute, 0)
 		if neigh != nil {
 			eps = buildEndpoints(neigh)
-			routes = buildNeighRoutes(neigh)
+			routes = buildNeighRoutes(n, id)
 		}
 		stat := wgStats[cfg.PubKey]
 		neighbours = append(neighbours, &protocol.NeighbourInfo{
@@ -231,10 +231,17 @@ func buildEndpoints(neigh *state.Neighbour) []*protocol.EndpointInfo {
 	return eps
 }
 
-func buildNeighRoutes(neigh *state.Neighbour) []*protocol.NeighRoute {
-	routes := make([]*protocol.NeighRoute, 0, len(neigh.Routes))
-	for _, route := range neigh.Routes {
-		routes = append(routes, neighRouteProto(route))
+func buildNeighRoutes(n *Nylon, peer state.NodeId) []*protocol.NeighRoute {
+	links := n.RouterState.GetPeerLinks(peer)
+	routeCount := 0
+	for _, link := range links {
+		routeCount += len(link.Routes)
+	}
+	routes := make([]*protocol.NeighRoute, 0, routeCount)
+	for _, link := range links {
+		for _, route := range link.Routes {
+			routes = append(routes, neighRouteProto(route))
+		}
 	}
 	slices.SortFunc(routes, func(a, b *protocol.NeighRoute) int {
 		return comparePubRoute(a.PubRoute, b.PubRoute)

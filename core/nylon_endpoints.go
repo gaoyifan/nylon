@@ -305,26 +305,35 @@ func (n *Nylon) probeNew() error {
 			continue
 		}
 		cfg := n.GetRouter(peer)
-		// assumption: we don't need to connect to the same endpoint again within the scope of the same node
-		for _, ep := range cfg.Endpoints {
-			ap, err := ep.Get()
-			if err != nil {
-				continue
-			}
-			idx := slices.IndexFunc(n.RouterState.GetPeerLinks(peer), func(link *state.Link) bool {
-				lap, err := link.Endpoint.AsNylonEndpoint().DynEP.Get()
+		for _, bind := range n.LocalCfg.NormalizedBinds() {
+			for _, ep := range cfg.Endpoints {
+				ap, err := ep.Get()
 				if err != nil {
-					return false
+					continue
 				}
-				return !link.Endpoint.IsRemote() && lap == ap
-			})
-			if idx == -1 {
-				// add the link to the neighbour
-				dpl := state.NewEndpoint(ep, false, nil, &n.RouterTunables)
-				link := n.RouterState.AddLink(peer, dpl)
-				err := n.ProbeLink(link.ID, false)
-				if err != nil {
-					//n.Log.Debug("discovery probe failed", "err", err.Error())
+				idx := slices.IndexFunc(n.RouterState.GetPeerLinks(peer), func(link *state.Link) bool {
+					nep := link.Endpoint.AsNylonEndpoint()
+					if nep == nil || nep.LocalBind != bind.ID || link.Endpoint.IsRemote() {
+						return false
+					}
+					lap, err := nep.DynEP.Get()
+					if err != nil {
+						return false
+					}
+					return lap == ap
+				})
+				if idx == -1 {
+					// add the link to the neighbour
+					dpl := state.NewEndpoint(ep.Clone(), false, nil, &n.RouterTunables)
+					dpl.LocalBind = bind.ID
+					dpl.Bind = bind
+					link := n.RouterState.AddLink(peer, dpl)
+					if n.Device != nil {
+						err := n.ProbeLink(link.ID, false)
+						if err != nil {
+							//n.Log.Debug("discovery probe failed", "err", err.Error())
+						}
+					}
 				}
 			}
 		}

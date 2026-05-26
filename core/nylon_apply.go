@@ -10,6 +10,22 @@ import (
 	"github.com/encodeous/nylon/state"
 )
 
+type linkTransportKey struct {
+	LocalBind state.LocalBindID
+	Remote    netip.AddrPort
+}
+
+func transportKeyFor(localBind state.LocalBindID, ep *state.DynamicEndpoint) (linkTransportKey, bool) {
+	if ep == nil {
+		return linkTransportKey{}, false
+	}
+	ap, err := ep.Get()
+	if err != nil {
+		return linkTransportKey{}, false
+	}
+	return linkTransportKey{LocalBind: localBind, Remote: ap}, true
+}
+
 type ApplyResult string
 
 const (
@@ -121,8 +137,15 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 			Routes: make(map[netip.Prefix]state.NeighRoute),
 			Eps:    make([]state.Endpoint, 0, len(cfg.Endpoints)),
 		}
+		seenTransport := make(map[linkTransportKey]struct{}, len(cfg.Endpoints)*len(n.LocalCfg.NormalizedBinds()))
 		for _, bind := range n.LocalCfg.NormalizedBinds() {
 			for _, ep := range cfg.Endpoints {
+				if key, ok := transportKeyFor(bind.ID, ep); ok {
+					if _, exists := seenTransport[key]; exists {
+						continue
+					}
+					seenTransport[key] = struct{}{}
+				}
 				nep := state.NewEndpoint(ep.Clone(), false, nil, &n.RouterTunables)
 				nep.LocalBind = bind.ID
 				nep.Bind = bind
@@ -168,6 +191,7 @@ func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.Dynam
 
 	eps := make([]state.Endpoint, 0, len(neigh.Eps)+len(desired))
 	seen := make(map[state.LinkID]struct{}, len(desired)*len(binds))
+	seenTransport := make(map[linkTransportKey]struct{}, len(desired)*len(binds))
 	for _, ep := range neigh.Eps {
 		nep := ep.AsNylonEndpoint()
 		if ep.IsRemote() {
@@ -191,6 +215,12 @@ func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.Dynam
 				}
 			}
 			id := state.LinkID{Peer: neigh.Id, LocalBind: localBind, RemoteEndpoint: nep.RemoteEndpointID(), Generation: nep.Generation}
+			if key, ok := transportKeyFor(localBind, nep.DynEP); ok {
+				if _, exists := seenTransport[key]; exists {
+					continue
+				}
+				seenTransport[key] = struct{}{}
+			}
 			eps = append(eps, ep)
 			seen[id] = struct{}{}
 		}
@@ -203,6 +233,12 @@ func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.Dynam
 			}
 			if _, ok := seen[id]; ok {
 				continue
+			}
+			if key, ok := transportKeyFor(bind.ID, ep); ok {
+				if _, exists := seenTransport[key]; exists {
+					continue
+				}
+				seenTransport[key] = struct{}{}
 			}
 			nep := state.NewEndpoint(ep.Clone(), false, nil, t)
 			nep.LocalBind = bind.ID
