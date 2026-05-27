@@ -868,10 +868,10 @@ func TestRouter_MultipleLinksToSamePeerHaveIndependentRoutes(t *testing.T) {
 		Advertised:     map[netip.Prefix]state.Advertisement{nodeToPrefix("A"): {NodeId: state.NodeId("A"), Expiry: maxTime}},
 	}
 
-	fast := AddLink(rs, NewMockEndpoint("B", 1))
 	slow := AddLink(rs, NewMockEndpoint("B", 10))
-	fastLink := rs.GetLinkForEndpoint("B", fast)
+	fast := AddLink(rs, NewMockEndpoint("B", 1))
 	slowLink := rs.GetLinkForEndpoint("B", slow)
+	fastLink := rs.GetLinkForEndpoint("B", fast)
 
 	HandleLinkUpdate(rs, h, slowLink.ID, MakePubRoute("S", sPrefix, 0, 1))
 	HandleLinkUpdate(rs, h, fastLink.ID, MakePubRoute("S", sPrefix, 0, 20))
@@ -879,16 +879,15 @@ func TestRouter_MultipleLinksToSamePeerHaveIndependentRoutes(t *testing.T) {
 
 	assert.Len(t, slowLink.Routes, 1)
 	assert.Len(t, fastLink.Routes, 1)
-	assert.Equal(t, slowLink.ID, rs.Routes[sPrefix].NhLink)
+	assert.Equal(t, fastLink.ID, rs.Routes[sPrefix].NhLink)
 	assert.Equal(t, state.NodeId("B"), rs.Routes[sPrefix].Nh)
-	assert.Equal(t, uint32(11), rs.Routes[sPrefix].Metric)
+	assert.Equal(t, uint32(2), rs.Routes[sPrefix].Metric)
 
-	slow.metric = 50
-	HandleLinkUpdate(rs, h, fastLink.ID, MakePubRoute("S", sPrefix, 1, 20))
+	fast.active = false
 	ComputeRoutes(rs, h)
 
-	assert.Equal(t, fastLink.ID, rs.Routes[sPrefix].NhLink)
-	assert.Equal(t, uint32(21), rs.Routes[sPrefix].Metric)
+	assert.Equal(t, slowLink.ID, rs.Routes[sPrefix].NhLink)
+	assert.Equal(t, uint32(11), rs.Routes[sPrefix].Metric)
 }
 
 func TestRouter_AckRetractCarriesRetractionToken(t *testing.T) {

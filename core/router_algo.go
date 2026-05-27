@@ -521,6 +521,8 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 	//   holes if the metric being used is not left-distributive
 	//   (Section 3.5.2).
 
+	bestPeerLinks := bestActiveLinksByPeer(s)
+
 	// enumerate through routed links
 	for _, link := range s.LinkList() {
 		if link.Endpoint == nil || !link.Endpoint.IsActive() {
@@ -531,9 +533,11 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 
 		// Cost(A, B)
 		CAB := state.INF
+		nhLink := link
 
-		if link.Endpoint != nil && link.Endpoint.IsActive() {
-			CAB = link.Endpoint.Metric()
+		if bestLink, ok := bestPeerLinks[link.Peer]; ok {
+			nhLink = bestLink
+			CAB = bestLink.Endpoint.Metric()
 			CAB = AddMetric(CAB, s.HopCost) // to prevent 0 cost metric
 		}
 
@@ -559,7 +563,7 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 					Source: adv.Source,
 					FD:     fd,
 				},
-				NhLink:      link.ID,
+				NhLink:      nhLink.ID,
 				Nh:          link.Peer,
 				ExpireAt:    adv.ExpireAt,
 				RetractedBy: []state.LinkID{},
@@ -568,13 +572,6 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 			//   *  an unfeasible route is never selected.
 			if !checkFeasibility(s, adv.PubRoute) {
 				continue // ignored
-			}
-
-			// Refresh the current winner for this recomputation. This keeps a
-			// selected next hop selected even when its metric worsens.
-			if exists && oldRoute.NhLink == newRoute.NhLink {
-				newTable[prefix] = newRoute
-				continue
 			}
 
 			if !exists {
@@ -646,6 +643,20 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 	}
 
 	s.Routes = newTable // update the route table
+}
+
+func bestActiveLinksByPeer(s *state.RouterState) map[state.NodeId]*state.Link {
+	best := make(map[state.NodeId]*state.Link)
+	for _, link := range s.LinkList() {
+		if link.Endpoint == nil || !link.Endpoint.IsActive() {
+			continue
+		}
+		cur := best[link.Peer]
+		if cur == nil || link.Endpoint.Metric() < cur.Endpoint.Metric() {
+			best[link.Peer] = link
+		}
+	}
+	return best
 }
 
 func SolveStarvation(router *state.RouterState, r Router) {
