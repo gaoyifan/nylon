@@ -311,6 +311,9 @@ func (n *Nylon) probeNew() error {
 				if err != nil {
 					continue
 				}
+				if !state.SameIPFamily(bind.Source, ap.Addr()) {
+					continue
+				}
 				idx := slices.IndexFunc(n.RouterState.GetPeerLinks(peer), func(link *state.Link) bool {
 					nep := link.Endpoint.AsNylonEndpoint()
 					if nep == nil || nep.LocalBind != bind.ID || link.Endpoint.IsRemote() {

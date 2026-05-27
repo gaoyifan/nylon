@@ -15,6 +15,17 @@ type linkTransportKey struct {
 	Remote    netip.AddrPort
 }
 
+func bindMatchesEndpointFamily(bind state.LocalBind, ep *state.DynamicEndpoint) bool {
+	if ep == nil || !bind.Source.IsValid() {
+		return true
+	}
+	ap, err := ep.Get()
+	if err != nil {
+		return true
+	}
+	return state.SameIPFamily(bind.Source, ap.Addr())
+}
+
 func transportKeyFor(localBind state.LocalBindID, ep *state.DynamicEndpoint) (linkTransportKey, bool) {
 	if ep == nil {
 		return linkTransportKey{}, false
@@ -140,6 +151,9 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 		seenTransport := make(map[linkTransportKey]struct{}, len(cfg.Endpoints)*len(n.LocalCfg.NormalizedBinds()))
 		for _, bind := range n.LocalCfg.NormalizedBinds() {
 			for _, ep := range cfg.Endpoints {
+				if !bindMatchesEndpointFamily(bind, ep) {
+					continue
+				}
 				if key, ok := transportKeyFor(bind.ID, ep); ok {
 					if _, exists := seenTransport[key]; exists {
 						continue
@@ -214,6 +228,9 @@ func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.Dynam
 					break
 				}
 			}
+			if !bindMatchesEndpointFamily(nep.Bind, nep.DynEP) {
+				continue
+			}
 			id := state.LinkID{Peer: neigh.Id, LocalBind: localBind, RemoteEndpoint: nep.RemoteEndpointID(), Generation: nep.Generation}
 			if key, ok := transportKeyFor(localBind, nep.DynEP); ok {
 				if _, exists := seenTransport[key]; exists {
@@ -227,6 +244,9 @@ func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.Dynam
 	}
 	for _, bind := range binds {
 		for _, ep := range desired {
+			if !bindMatchesEndpointFamily(bind, ep) {
+				continue
+			}
 			id := state.LinkID{Peer: neigh.Id, LocalBind: bind.ID, RemoteEndpoint: ep.ID}
 			if id.RemoteEndpoint == "" {
 				id.RemoteEndpoint = state.RemoteEndpointID(ep.Value)

@@ -168,6 +168,24 @@ func TestReconcileConfiguredEndpointsSkipsDuplicateTransportTuple(t *testing.T) 
 	}
 }
 
+func TestReconcileConfiguredEndpointsSkipsSourceFamilyMismatch(t *testing.T) {
+	tunables := state.DefaultRouterTunables()
+	remote := netip.MustParseAddrPort("[2001:db8::1]:57175")
+	ep := state.NewDynamicEndpoint("router.example.com:57175")
+	ep.ID = "primary"
+	ep.SetResolved(remote)
+
+	neigh := &state.Neighbour{
+		Id:     "peer",
+		Routes: make(map[netip.Prefix]state.NeighRoute),
+	}
+	reconcileConfiguredEndpoints(neigh, []*state.DynamicEndpoint{ep}, []state.LocalBind{{ID: "wan", Source: netip.MustParseAddr("192.0.2.10")}}, &tunables)
+
+	if len(neigh.Eps) != 0 {
+		t.Fatalf("expected source family mismatch to be skipped, got %d endpoints", len(neigh.Eps))
+	}
+}
+
 func TestProbeNewDiscoversMissingBindSpecificLink(t *testing.T) {
 	tunables := state.DefaultRouterTunables()
 	remote := netip.MustParseAddrPort("203.0.113.10:57175")
@@ -215,6 +233,46 @@ func TestProbeNewDiscoversMissingBindSpecificLink(t *testing.T) {
 	}
 	if link := n.RouterState.GetLink(state.LinkID{Peer: "peer", LocalBind: "wan-b", RemoteEndpoint: "router"}); link == nil {
 		t.Fatalf("expected probeNew to add wan-b link, got %v", links)
+	}
+}
+
+func TestProbeNewSkipsSourceFamilyMismatch(t *testing.T) {
+	tunables := state.DefaultRouterTunables()
+	remote := netip.MustParseAddrPort("[2001:db8::1]:57175")
+	dyn := state.NewDynamicEndpoint("router.example.com:57175")
+	dyn.ID = "router"
+	dyn.SetResolved(remote)
+
+	n := &Nylon{
+		RouterTunables: tunables,
+		ConfigState: state.ConfigState{
+			LocalCfg: state.LocalCfg{
+				Id: "local",
+				Binds: []state.LocalBind{
+					{ID: "wan-v4", Source: netip.MustParseAddr("192.0.2.10")},
+				},
+			},
+			CentralCfg: state.CentralCfg{
+				Routers: []state.RouterCfg{
+					{NodeCfg: state.NodeCfg{Id: "local"}},
+					{NodeCfg: state.NodeCfg{Id: "peer"}, Endpoints: []*state.DynamicEndpoint{dyn}},
+				},
+				Graph: []string{"local, peer"},
+			},
+		},
+		RouterState: &state.RouterState{
+			RouterTunables: &tunables,
+			Links:          make(map[state.LinkID]*state.Link),
+			Neighbours:     []*state.Neighbour{{Id: "peer", Routes: make(map[netip.Prefix]state.NeighRoute)}},
+		},
+	}
+
+	if err := n.probeNew(); err != nil {
+		t.Fatal(err)
+	}
+
+	if links := n.RouterState.GetPeerLinks("peer"); len(links) != 0 {
+		t.Fatalf("expected no links for source family mismatch, got %d", len(links))
 	}
 }
 

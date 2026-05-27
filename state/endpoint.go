@@ -23,6 +23,13 @@ type Endpoint interface {
 	AsNylonEndpoint() *NylonEndpoint
 }
 
+func SameIPFamily(a, b netip.Addr) bool {
+	if !a.IsValid() || !b.IsValid() {
+		return true
+	}
+	return a.BitLen() == b.BitLen()
+}
+
 /*
 		DynamicEndpoint represents either an ip:port or a dns name. This may be resolved to a different address at any time
 
@@ -233,6 +240,9 @@ func (ep *NylonEndpoint) GetWgEndpoint(device *device.Device) (conn.Endpoint, er
 	ap, err := ep.DynEP.Get()
 	if err != nil {
 		return nil, err
+	}
+	if !SameIPFamily(ep.Bind.Source, ap.Addr()) {
+		return nil, fmt.Errorf("bind source %s does not match endpoint %s", ep.Bind.Source, ap)
 	}
 
 	if ep.WgEndpoint == nil || ep.WgEndpoint.DstIPPort() != ap {
