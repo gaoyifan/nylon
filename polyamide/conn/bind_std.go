@@ -372,16 +372,7 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 	defer s.putMessages(msgs)
 	ua := s.udpAddrPool.Get().(*net.UDPAddr)
 	defer s.udpAddrPool.Put(ua)
-	if is6 {
-		as16 := endpoint.DstIP().As16()
-		copy(ua.IP, as16[:])
-		ua.IP = ua.IP[:16]
-	} else {
-		as4 := endpoint.DstIP().As4()
-		copy(ua.IP, as4[:])
-		ua.IP = ua.IP[:4]
-	}
-	ua.Port = int(endpoint.(*StdNetEndpoint).Port())
+	setUDPAddrFromEndpoint(ua, endpoint.(*StdNetEndpoint), is6)
 	var (
 		retried bool
 		err     error
@@ -414,6 +405,19 @@ retry:
 		return ErrUDPGSODisabled{onLaddr: conn.LocalAddr().String(), RetryErr: err}
 	}
 	return err
+}
+
+func setUDPAddrFromEndpoint(ua *net.UDPAddr, endpoint *StdNetEndpoint, is6 bool) {
+	if is6 {
+		as16 := endpoint.DstIP().As16()
+		ua.IP = ua.IP[:16]
+		copy(ua.IP, as16[:])
+	} else {
+		as4 := endpoint.DstIP().As4()
+		ua.IP = ua.IP[:4]
+		copy(ua.IP, as4[:])
+	}
+	ua.Port = int(endpoint.Port())
 }
 
 func (s *StdNetBind) send(conn *net.UDPConn, pc batchWriter, msgs []ipv6.Message) error {

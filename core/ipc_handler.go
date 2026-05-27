@@ -212,12 +212,23 @@ func buildEndpoints(neigh *state.Neighbour) []*protocol.EndpointInfo {
 		if ap, err := nep.DynEP.Get(); err == nil {
 			resolved = stringPtr(ap.String())
 		}
+		var bindInterface *string
+		if nep.Bind.Interface != "" {
+			bindInterface = stringPtr(nep.Bind.Interface)
+		}
+		var bindSource *string
+		if nep.Bind.Source.IsValid() {
+			bindSource = stringPtr(nep.Bind.Source.String())
+		}
 		eps = append(eps, &protocol.EndpointInfo{
 			Address:         nep.DynEP.Value,
 			Resolved:        resolved,
 			Active:          ep.IsActive(),
 			RemoteInit:      ep.IsRemote(),
 			Metric:          ep.Metric(),
+			BindId:          string(nep.LocalBind),
+			BindInterface:   bindInterface,
+			BindSource:      bindSource,
 			FilteredRttNs:   int64(nep.FilteredPing()),
 			StabilizedRttNs: int64(nep.StabilizedPing()),
 		})
@@ -226,7 +237,10 @@ func buildEndpoints(neigh *state.Neighbour) []*protocol.EndpointInfo {
 		if cmpMetric := cmp.Compare(a.Metric, b.Metric); cmpMetric != 0 {
 			return cmpMetric
 		}
-		return cmp.Compare(a.Address, b.Address)
+		if cmpAddress := cmp.Compare(a.Address, b.Address); cmpAddress != 0 {
+			return cmpAddress
+		}
+		return cmp.Compare(a.BindId, b.BindId)
 	})
 	return eps
 }

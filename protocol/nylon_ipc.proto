@@ -61,8 +61,11 @@ message EndpointInfo {
   bool active = 3;
   bool remote_init = 4;
   uint32 metric = 5;
+  string bind_id = 6;
   int64 filtered_rtt_ns = 7;
   int64 stabilized_rtt_ns = 8;
+  optional string bind_interface = 9;
+  optional string bind_source = 10;
 }
 
 message WireGuardPeerStats {

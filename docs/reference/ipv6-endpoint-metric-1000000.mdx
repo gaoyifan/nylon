@@ -1,0 +1,96 @@
+# IPv6 endpoint metric 1000000 root cause
+
+This note documents the root cause of IPv6 endpoint metrics staying at
+`1000000` or `INF` in multi-link deployments, and the cleanup of the temporary
+changes that were investigated while debugging it.
+
+## Symptom
+
+In a mixed IPv4 and IPv6 endpoint deployment, some IPv6 links stayed inactive
+and appeared with an infinite metric even when the underlay path was healthy.
+The clearest example was `el2 -> el`:
+
+- Underlay IPv6 ping from `2001:da8:d800:931::98` to
+  `2001:da8:d800:931::152` was sub-millisecond.
+- `nylon status -i nylon0` on `el2` showed the configured IPv6 endpoint
+  `[2001:da8:d800:931::152]:57175` with metric `INF`.
+- Sending a Nylon probe reported only that the packet was handed to the send
+  path; it did not prove that the remote endpoint received and answered it.
+
+## Root cause
+
+The standard UDP bind keeps a pool of `net.UDPAddr` values for send operations.
+Before the fix, the send path reused a pooled address and copied the destination
+IP into `ua.IP` before resizing the slice:
+
+```go
+as16 := endpoint.DstIP().As16()
+copy(ua.IP, as16[:])
+ua.IP = ua.IP[:16]
+```
+
+That is safe only when `ua.IP` already has length 16. After an IPv4 send, the
+same pooled `net.UDPAddr` can have `ua.IP` length 4. The next IPv6 send then
+copies only the first 4 bytes of the 16-byte IPv6 address. For example:
+
+- wanted: `2001:da8:d800:931::152`
+- sent to: `2001:da8::`
+
+The remote endpoint never saw the probe, so the link never collected RTT
+samples and its metric remained infinite.
+
+## Precise fix
+
+The fix is to resize the destination IP slice before copying bytes into it:
+
+```go
+as16 := endpoint.DstIP().As16()
+ua.IP = ua.IP[:16]
+copy(ua.IP, as16[:])
+```
+
+The IPv4 path follows the same shape with `ua.IP = ua.IP[:4]` before copying
+the IPv4 address. The send path now uses a small helper so both branches share
+the same ordering and port assignment.
+
+A regression test covers the exact failure mode:
+
+1. Reuse one `net.UDPAddr`.
+2. Fill it with an IPv4 endpoint, shrinking `ua.IP` to 4 bytes.
+3. Fill it with an IPv6 endpoint.
+4. Assert that `ua.AddrPort()` equals the full IPv6 endpoint.
+
+## Historical change review
+
+The following changes were evaluated and intentionally excluded from the final
+metric fix:
+
+- RTT confidence-window changes: not causal. The endpoint had no valid return
+  traffic, so changing RTT smoothing only changed how the symptom appeared.
+- Seqno request changes for unfeasible routes: not causal and increased control
+  plane pressure during testing.
+- Route recomputation throttling/coalescing: useful as a separate performance
+  topic, but not the root cause of IPv6 endpoint inactivity.
+
+The status endpoint bind columns are kept as observability. They do not affect
+routing, but they make multi-link debugging precise by showing the bind ID,
+interface, and source address for each endpoint row.
+
+## Verification
+
+For a suspected link, verify both the underlay path and the actual Nylon UDP
+destination:
+
+```sh
+ping -6 -I 2001:da8:d800:931::98 -c 3 2001:da8:d800:931::152
+tcpdump -ni eth0 'ip6 and host 2001:da8:d800:931::152 and udp port 57175'
+nylon status -i nylon0
+```
+
+Expected results after the fix:
+
+- `tcpdump` shows packets addressed to the full IPv6 endpoint, not a truncated
+  prefix.
+- The endpoint row for the IPv6 bind becomes active.
+- The metric converges to the measured RTT range instead of staying at
+  `1000000` or `INF`.

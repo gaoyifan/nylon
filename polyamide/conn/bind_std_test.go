@@ -3,6 +3,7 @@ package conn
 import (
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"testing"
 
 	"golang.org/x/net/ipv6"
@@ -30,6 +31,22 @@ func TestStdNetBindReceiveFuncAfterClose(t *testing.T) {
 func mockSetGSOSize(control *[]byte, gsoSize uint16) {
 	*control = (*control)[:cap(*control)]
 	binary.LittleEndian.PutUint16(*control, gsoSize)
+}
+
+func Test_setUDPAddrFromEndpointExpandsPooledIPv4AddressForIPv6(t *testing.T) {
+	ua := &net.UDPAddr{IP: make(net.IP, 16)}
+	v4 := &StdNetEndpoint{AddrPort: netip.MustParseAddrPort("192.0.2.1:57175")}
+	v6 := &StdNetEndpoint{AddrPort: netip.MustParseAddrPort("[2001:db8:1234:5678::152]:57175")}
+
+	setUDPAddrFromEndpoint(ua, v4, false)
+	if got := ua.AddrPort(); got != v4.AddrPort {
+		t.Fatalf("IPv4 AddrPort = %v, want %v", got, v4.AddrPort)
+	}
+
+	setUDPAddrFromEndpoint(ua, v6, true)
+	if got := ua.AddrPort(); got != v6.AddrPort {
+		t.Fatalf("IPv6 AddrPort after IPv4 reuse = %v, want %v", got, v6.AddrPort)
+	}
 }
 
 func Test_coalesceMessages(t *testing.T) {
