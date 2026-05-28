@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/encodeous/nylon/polyamide/conn"
 	"github.com/encodeous/nylon/polyamide/device"
 	"github.com/gaissmai/bart"
 	"go4.org/netipx"
@@ -17,72 +18,95 @@ import (
 
 type RouteTableEntry struct {
 	Nh        state.NodeId
+	LinkID    state.LinkID
 	Peer      *device.Peer
+	Endpoint  conn.Endpoint
 	Blackhole bool
 }
 
-func (n *Nylon) GetNeighIO(neigh state.NodeId) *IOPending {
-	nio, ok := n.router.IO[neigh]
+func (n *Nylon) GetLinkIO(linkID state.LinkID) *IOPending {
+	nio, ok := n.router.IO[linkID]
 	if !ok {
 		nio = &IOPending{
-			SeqnoReq:   make(map[state.Source]state.Pair[uint16, uint8]),
-			SeqnoDedup: ttlcache.New[state.Source, uint16](ttlcache.WithTTL[state.Source, uint16](n.SeqnoDedupTTL), ttlcache.WithDisableTouchOnHit[state.Source, uint16]()),
-			Acks:       make(map[netip.Prefix]struct{}),
-			Updates:    make(map[netip.Prefix]*protocol.Ny_Update),
+			SeqnoReq: make(map[state.Source]state.Pair[uint16, uint8]),
+			Acks:     make(map[netip.Prefix]uint64),
+			Updates:  make(map[netip.Prefix]*protocol.Ny_Update),
 		}
-		n.router.IO[neigh] = nio
+		n.router.IO[linkID] = nio
 	}
-	n.router.IO[neigh] = nio
 	return nio
 }
 
-func (n *Nylon) SendRouteUpdate(neigh state.NodeId, advRoute state.PubRoute) {
-	nio := n.GetNeighIO(neigh)
+func (n *Nylon) SendRouteUpdate(linkID state.LinkID, advRoute state.PubRoute) {
+	nio := n.GetLinkIO(linkID)
 	prefix, _ := advRoute.Prefix.MarshalBinary()
 	nio.Updates[advRoute.Prefix] = &protocol.Ny_Update{
-		RouterId: string(advRoute.NodeId),
-		Prefix:   prefix,
-		Seqno:    uint32(advRoute.Seqno),
-		Metric:   advRoute.Metric,
+		RouterId:        string(advRoute.NodeId),
+		Prefix:          prefix,
+		Seqno:           uint32(advRoute.Seqno),
+		Metric:          advRoute.Metric,
+		RetractionToken: advRoute.RetractionToken,
 	}
 }
 
-func (n *Nylon) SendAckRetract(neigh state.NodeId, prefix netip.Prefix) {
-	nio := n.GetNeighIO(neigh)
-	nio.Acks[prefix] = struct{}{}
+func (n *Nylon) SendAckRetract(linkID state.LinkID, prefix netip.Prefix, token uint64) {
+	nio := n.GetLinkIO(linkID)
+	nio.Acks[prefix] = token
 }
 
 func (n *Nylon) BroadcastSendRouteUpdate(advRoute state.PubRoute) {
-	for _, neigh := range n.RouterState.Neighbours {
-		n.SendRouteUpdate(neigh.Id, advRoute)
+	for _, link := range n.RouterState.LinkList() {
+		if link.IsActive() {
+			n.SendRouteUpdate(link.ID, advRoute)
+		}
 	}
 }
 
-func (n *Nylon) RequestSeqno(neigh state.NodeId, src state.Source, seqno uint16, hopCnt uint8) {
-	nio := n.GetNeighIO(neigh)
-	old := nio.SeqnoDedup.Get(src)
-	maxSeq := seqno
-	if old != nil {
-		maxSeq = max(seqno, old.Value())
-		if SeqnoGe(old.Value(), seqno) {
-			return // we have already sent such a request before
-		}
+// seqnoDedupAllow reports whether a seqno request for src should be emitted,
+// suppressing requests whose seqno was already broadcast router-wide. When
+// allowed, it records the highest seen seqno.
+func (n *Nylon) seqnoDedupAllow(src state.Source, seqno uint16) bool {
+	if n.router.SeqnoDedup == nil {
+		n.router.SeqnoDedup = ttlcache.New[state.Source, uint16](ttlcache.WithTTL[state.Source, uint16](n.SeqnoDedupTTL), ttlcache.WithDisableTouchOnHit[state.Source, uint16]())
 	}
-	nio.SeqnoDedup.Set(src, maxSeq, ttlcache.DefaultTTL)
+	maxSeq := seqno
+	if old := n.router.SeqnoDedup.Get(src); old != nil {
+		if SeqnoGe(old.Value(), seqno) {
+			return false // we have already sent such a request before
+		}
+		maxSeq = max(seqno, old.Value())
+	}
+	n.router.SeqnoDedup.Set(src, maxSeq, ttlcache.DefaultTTL)
+	return true
+}
+
+// mergeSeqnoReq records a pending seqno request on nio, keeping the lowest
+// requested seqno and the largest hop count for src.
+func mergeSeqnoReq(nio *IOPending, src state.Source, seqno uint16, hopCnt uint8) {
 	req, ok := nio.SeqnoReq[src]
 	if !ok || seqno < req.V1 {
 		req = state.Pair[uint16, uint8]{V1: seqno, V2: hopCnt}
-	} else {
-		if hopCnt > req.V2 {
-			req.V2 = hopCnt
-		}
+	} else if hopCnt > req.V2 {
+		req.V2 = hopCnt
 	}
 	nio.SeqnoReq[src] = req
 }
 
+func (n *Nylon) RequestSeqno(linkID state.LinkID, src state.Source, seqno uint16, hopCnt uint8) {
+	if !n.seqnoDedupAllow(src, seqno) {
+		return
+	}
+	mergeSeqnoReq(n.GetLinkIO(linkID), src, seqno, hopCnt)
+}
+
 func (n *Nylon) BroadcastRequestSeqno(src state.Source, seqno uint16, hopCnt uint8) {
-	for _, neigh := range n.RouterState.Neighbours {
-		n.RequestSeqno(neigh.Id, src, seqno, hopCnt)
+	if !n.seqnoDedupAllow(src, seqno) {
+		return
+	}
+	for _, link := range n.RouterState.LinkList() {
+		if link.IsActive() {
+			mergeSeqnoReq(n.GetLinkIO(link.ID), src, seqno, hopCnt)
+		}
 	}
 }
 
@@ -94,7 +118,7 @@ func (n *Nylon) RouterEvent(event string, desc string, args ...any) {
 }
 
 func (n *Nylon) UpdateNeighbour(neigh state.NodeId) {
-	PushFullTable(n.RouterState, n, neigh)
+	PushFullTableToPeer(n.RouterState, n, neigh)
 }
 
 func (n *Nylon) TableInsertRoute(prefix netip.Prefix, route state.SelRoute) {
@@ -112,14 +136,28 @@ func (n *Nylon) TableInsertRoute(prefix netip.Prefix, route state.SelRoute) {
 		return
 	}
 	peer := n.Device.LookupPeer(device.NoisePublicKey(n.GetNode(nh).PubKey))
+	var endpoint conn.Endpoint
+	link := n.RouterState.GetLink(route.NhLink)
+	if link != nil && link.Endpoint != nil {
+		if nep := link.Endpoint.AsNylonEndpoint(); nep != nil {
+			endpoint = nep.WgEndpoint
+			if endpoint == nil && n.Device != nil {
+				endpoint, _ = nep.GetWgEndpoint(n.Device)
+			}
+		}
+	}
 	nf.Insert(prefix, RouteTableEntry{
-		Nh:   nh,
-		Peer: peer,
+		Nh:       nh,
+		LinkID:   route.NhLink,
+		Peer:     peer,
+		Endpoint: endpoint,
 	})
 	if route.Nh == n.LocalCfg.Id {
 		ne.Insert(prefix, RouteTableEntry{
-			Nh:   nh,
-			Peer: peer,
+			Nh:       nh,
+			LinkID:   route.NhLink,
+			Peer:     peer,
+			Endpoint: endpoint,
 		})
 	} else {
 		ne.Delete(prefix)
@@ -139,28 +177,28 @@ func (n *Nylon) TableDeleteRoute(prefix netip.Prefix) {
 
 type IOPending struct {
 	// SeqnoReq values represent a pair of (seqno, hop count)
-	SeqnoReq   map[state.Source]state.Pair[uint16, uint8]
-	SeqnoDedup *ttlcache.Cache[state.Source, uint16]
-	Acks       map[netip.Prefix]struct{}
-	Updates    map[netip.Prefix]*protocol.Ny_Update
+	SeqnoReq map[state.Source]state.Pair[uint16, uint8]
+	Acks     map[netip.Prefix]uint64
+	Updates  map[netip.Prefix]*protocol.Ny_Update
 }
 
 func (n *Nylon) CleanupRouter() error {
 	n.router.log = nil
 	n.router.IO = nil
+	n.router.SeqnoDedup = nil
 	return nil
 }
 
 func (n *Nylon) GcRouter() error {
 	RunGC(n.RouterState, n)
-	for id, _ := range n.router.IO {
-		if n.RouterState.GetNeighbour(id) == nil {
+	for id := range n.router.IO {
+		if n.RouterState.GetLink(id) == nil {
 			delete(n.router.IO, id)
 			continue
 		}
 	}
-	for _, nio := range n.router.IO {
-		nio.SeqnoDedup.DeleteExpired()
+	if n.router.SeqnoDedup != nil {
+		n.router.SeqnoDedup.DeleteExpired()
 	}
 	return nil
 }
@@ -168,7 +206,8 @@ func (n *Nylon) GcRouter() error {
 func (n *Nylon) InitRouter() error {
 	n.router.log = n.Log.With("module", log.ScopeRouter)
 	n.router.log.Debug("init router")
-	n.router.IO = make(map[state.NodeId]*IOPending)
+	n.router.IO = make(map[state.LinkID]*IOPending)
+	n.router.SeqnoDedup = ttlcache.New[state.Source, uint16](ttlcache.WithTTL[state.Source, uint16](n.SeqnoDedupTTL), ttlcache.WithDisableTouchOnHit[state.Source, uint16]())
 	n.router.ForwardTable.Store(new(bart.Table[RouteTableEntry]{}))
 	n.router.ExitTable.Store(new(bart.Table[RouteTableEntry]{}))
 	n.RouterState = &state.RouterState{
@@ -177,6 +216,7 @@ func (n *Nylon) InitRouter() error {
 		SelfSeqno:      make(map[netip.Prefix]uint16),
 		Routes:         make(map[netip.Prefix]state.SelRoute),
 		Sources:        make(map[state.Source]state.FD),
+		Links:          make(map[state.LinkID]*state.Link),
 		Neighbours:     make([]*state.Neighbour, 0),
 		Advertised:     make(map[netip.Prefix]state.Advertisement),
 	}
@@ -297,19 +337,20 @@ func (n *Nylon) checkNode(id state.NodeId) bool {
 }
 
 // packet handlers
-func (n *Nylon) routerHandleRouteUpdate(node state.NodeId, update *protocol.Ny_Update) error {
+func (n *Nylon) routerHandleRouteUpdate(linkID state.LinkID, update *protocol.Ny_Update) error {
 	prefix := netip.Prefix{}
 	err := prefix.UnmarshalBinary(update.Prefix)
 	if err != nil {
 		n.router.log.Warn("received update with invalid prefix", "prefix", update.Prefix, "err", err)
 		return nil
 	}
-	if !n.checkNeigh(node) ||
+	link := n.RouterState.GetLink(linkID)
+	if link == nil ||
 		!n.checkPrefix(prefix) ||
 		!n.checkNode(state.NodeId(update.RouterId)) {
 		return nil
 	}
-	HandleNeighbourUpdate(n.RouterState, n, node, state.PubRoute{
+	HandleLinkUpdate(n.RouterState, n, linkID, state.PubRoute{
 		Source: state.Source{
 			NodeId: state.NodeId(update.RouterId),
 			Prefix: prefix,
@@ -318,39 +359,39 @@ func (n *Nylon) routerHandleRouteUpdate(node state.NodeId, update *protocol.Ny_U
 			Seqno:  uint16(update.Seqno),
 			Metric: update.Metric,
 		},
+		RetractionToken: update.GetRetractionToken(),
 	})
 	ComputeRoutes(n.RouterState, n)
 	return nil
 }
 
-func (n *Nylon) routerHandleAckRetract(neigh state.NodeId, update *protocol.Ny_AckRetract) error {
+func (n *Nylon) routerHandleAckRetract(linkID state.LinkID, update *protocol.Ny_AckRetract) error {
 	prefix := netip.Prefix{}
 	err := prefix.UnmarshalBinary(update.Prefix)
 	if err != nil {
 		n.router.log.Warn("received ack retract with invalid prefix", "prefix", update.Prefix, "err", err)
 		return nil
 	}
-	if !n.checkPrefix(prefix) ||
-		!n.checkNeigh(neigh) {
+	if !n.checkPrefix(prefix) || n.RouterState.GetLink(linkID) == nil {
 		return nil
 	}
-	HandleAckRetract(n.RouterState, n, neigh, prefix)
+	HandleLinkAckRetract(n.RouterState, n, linkID, prefix, update.GetToken())
 	return nil
 }
 
-func (n *Nylon) routerHandleSeqnoRequest(neigh state.NodeId, pkt *protocol.Ny_SeqnoRequest) error {
+func (n *Nylon) routerHandleSeqnoRequest(linkID state.LinkID, pkt *protocol.Ny_SeqnoRequest) error {
 	prefix := netip.Prefix{}
 	err := prefix.UnmarshalBinary(pkt.Prefix)
 	if err != nil {
 		n.router.log.Warn("received seqno request with invalid prefix", "prefix", pkt.Prefix, "err", err)
 		return nil
 	}
-	if !n.checkNeigh(neigh) ||
+	if n.RouterState.GetLink(linkID) == nil ||
 		!n.checkPrefix(prefix) ||
 		!n.checkNode(state.NodeId(pkt.RouterId)) {
 		return nil
 	}
-	HandleSeqnoRequest(n.RouterState, n, neigh, state.Source{
+	HandleLinkSeqnoRequest(n.RouterState, n, linkID, state.Source{
 		NodeId: state.NodeId(pkt.RouterId),
 		Prefix: prefix,
 	}, uint16(pkt.Seqno), uint8(pkt.HopCount))
@@ -358,15 +399,22 @@ func (n *Nylon) routerHandleSeqnoRequest(neigh state.NodeId, pkt *protocol.Ny_Se
 }
 
 func (n *Nylon) flushIO() error {
-	for _, neigh := range n.RouterState.Neighbours {
+	for _, link := range n.RouterState.LinkList() {
 		// TODO, investigate effect of packet loss on control messages
-		best := neigh.BestEndpoint()
-		nio := n.GetNeighIO(neigh.Id)
+		nio := n.GetLinkIO(link.ID)
 		if nio == nil {
 			continue
 		}
-		if best != nil && best.IsActive() {
-			peer := n.Device.LookupPeer(device.NoisePublicKey(n.GetNode(neigh.Id).PubKey))
+		if link.IsActive() {
+			peer := n.Device.LookupPeer(device.NoisePublicKey(n.GetNode(link.Peer).PubKey))
+			ep := link.Endpoint.AsNylonEndpoint()
+			if ep == nil {
+				continue
+			}
+			nep, err := ep.GetWgEndpoint(n.Device)
+			if err != nil {
+				continue
+			}
 			for {
 				bundle := &protocol.TransportBundle{}
 				tLength := 0
@@ -404,11 +452,12 @@ func (n *Nylon) flushIO() error {
 					tLength += proto.Size(req)
 				}
 
-				for prefix := range nio.Acks {
+				for prefix, token := range nio.Acks {
 					prefixBytes, _ := prefix.MarshalBinary()
 					req := &protocol.Ny{Type: &protocol.Ny_AckRetractOp{
 						AckRetractOp: &protocol.Ny_AckRetract{
 							Prefix: prefixBytes,
+							Token:  token,
 						},
 					}}
 					if tLength != 0 && tLength+proto.Size(req) >= n.SafeMTU {
@@ -423,7 +472,7 @@ func (n *Nylon) flushIO() error {
 					break
 				}
 			send:
-				err := n.SendNylonBundle(bundle, nil, peer)
+				err := n.SendNylonBundle(bundle, nep, peer)
 				if err != nil {
 					return err
 				}

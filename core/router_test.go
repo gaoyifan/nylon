@@ -732,7 +732,7 @@ func TestRouter_RetractedByClearedWhenHeldRouteRecovers(t *testing.T) {
 	assert.Equal(t, state.INF, rs.Routes[cPrefix].Metric)
 
 	HandleAckRetract(rs, h, "B", cPrefix)
-	assert.Equal(t, []state.NodeId{"B"}, rs.Routes[cPrefix].RetractedBy)
+	assert.Equal(t, []state.LinkID{rs.GetDefaultLink("B").ID}, rs.Routes[cPrefix].RetractedBy)
 
 	h.NeighUpdate(rs, "B", "C", cPrefix, 1, 10)
 	ComputeRoutes(rs, h)
@@ -852,6 +852,100 @@ func TestRouter_KeepsSelectedRouteOnEqualMetric(t *testing.T) {
 	assert.Equal(t, "B", string(rs.Routes[sPrefix].Nh))
 	assert.Equal(t, uint32(2), rs.Routes[sPrefix].Metric)
 	assert.Empty(t, h.GetActions())
+}
+
+func TestRouter_MultipleLinksToSamePeerHaveIndependentRoutes(t *testing.T) {
+	tunables := ConfigureConstants()
+	h := &RouterHarness{}
+	sPrefix := nodeToPrefix("S")
+	rs := &state.RouterState{
+		RouterTunables: tunables,
+		Id:             "A",
+		SelfSeqno:      make(map[netip.Prefix]uint16),
+		Routes:         make(map[netip.Prefix]state.SelRoute),
+		Sources:        make(map[state.Source]state.FD),
+		Neighbours:     MakeNeighbours("B"),
+		Advertised:     map[netip.Prefix]state.Advertisement{nodeToPrefix("A"): {NodeId: state.NodeId("A"), Expiry: maxTime}},
+	}
+
+	slow := AddLink(rs, NewMockEndpoint("B", 10))
+	fast := AddLink(rs, NewMockEndpoint("B", 1))
+	slowLink := rs.GetLinkForEndpoint("B", slow)
+	fastLink := rs.GetLinkForEndpoint("B", fast)
+
+	HandleLinkUpdate(rs, h, slowLink.ID, MakePubRoute("S", sPrefix, 0, 1))
+	HandleLinkUpdate(rs, h, fastLink.ID, MakePubRoute("S", sPrefix, 0, 20))
+	ComputeRoutes(rs, h)
+
+	assert.Len(t, slowLink.Routes, 1)
+	assert.Len(t, fastLink.Routes, 1)
+	assert.Equal(t, fastLink.ID, rs.Routes[sPrefix].NhLink)
+	assert.Equal(t, state.NodeId("B"), rs.Routes[sPrefix].Nh)
+	assert.Equal(t, uint32(2), rs.Routes[sPrefix].Metric)
+
+	fast.active = false
+	ComputeRoutes(rs, h)
+
+	assert.Equal(t, slowLink.ID, rs.Routes[sPrefix].NhLink)
+	assert.Equal(t, uint32(11), rs.Routes[sPrefix].Metric)
+}
+
+func TestRouter_AckRetractCarriesRetractionToken(t *testing.T) {
+	tunables := ConfigureConstants()
+	rs := &state.RouterState{
+		RouterTunables: tunables,
+		Id:             "A",
+		Routes:         make(map[netip.Prefix]state.SelRoute),
+		Sources:        make(map[state.Source]state.FD),
+		Neighbours:     MakeNeighbours("B"),
+	}
+	h := &RouterHarness{}
+	AddLink(rs, NewMockEndpoint("B", 0))
+	link := rs.GetDefaultLink("B")
+	prefix := nodeToPrefix("S")
+
+	HandleLinkUpdate(rs, h, link.ID, state.PubRoute{
+		Source:          state.Source{NodeId: "S", Prefix: prefix},
+		FD:              state.FD{Seqno: 1, Metric: state.INF},
+		RetractionToken: 77,
+	})
+
+	h.GetActions().AssertContains(t, AckRetract(state.NodeId("B"), prefix, 77))
+}
+
+func TestRouter_AckRetractIgnoresStaleToken(t *testing.T) {
+	tunables := ConfigureConstants()
+	rs := &state.RouterState{
+		RouterTunables: tunables,
+		Id:             "A",
+		Routes:         make(map[netip.Prefix]state.SelRoute),
+		Sources:        make(map[state.Source]state.FD),
+		Neighbours:     MakeNeighbours("B"),
+	}
+	h := &RouterHarness{}
+	AddLink(rs, NewMockEndpoint("B", 0))
+	link := rs.GetDefaultLink("B")
+	prefix := nodeToPrefix("S")
+	rs.Routes[prefix] = state.SelRoute{
+		PubRoute: state.PubRoute{
+			Source:          state.Source{NodeId: "S", Prefix: prefix},
+			FD:              state.FD{Seqno: 1, Metric: state.INF},
+			RetractionToken: 100,
+		},
+		Nh:       "B",
+		NhLink:   link.ID,
+		ExpireAt: time.Now().Add(time.Hour),
+	}
+
+	HandleLinkAckRetract(rs, h, link.ID, prefix, 99)
+	if got := rs.Routes[prefix].RetractedBy; len(got) != 0 {
+		t.Fatalf("stale token should not ack route, got %v", got)
+	}
+
+	HandleLinkAckRetract(rs, h, link.ID, prefix, 100)
+	if _, ok := rs.Routes[prefix]; ok {
+		t.Fatalf("matching token should release fully acked held route, got %v", rs.Routes[prefix])
+	}
 }
 
 func TestRouter_HeldRouteInstallsBlackhole(t *testing.T) {
@@ -1226,23 +1320,25 @@ func TestRouter_BroadcastUsesConfiguredNeighbours(t *testing.T) {
 			Advertised:     make(map[netip.Prefix]state.Advertisement),
 		},
 	}
-	n.router.IO = make(map[state.NodeId]*IOPending)
+	bLink := n.RouterState.AddLink("B", NewMockEndpoint("B", 1)).ID
+	cLink := n.RouterState.AddLink("C", NewMockEndpoint("C", 1)).ID
+	n.router.IO = make(map[state.LinkID]*IOPending)
 
 	n.BroadcastSendRouteUpdate(MakePubRoute("S", prefix, 0, 1))
-	if assert.Contains(t, n.router.IO, state.NodeId("B")) {
-		assert.Contains(t, n.router.IO["B"].Updates, prefix)
+	if assert.Contains(t, n.router.IO, bLink) {
+		assert.Contains(t, n.router.IO[bLink].Updates, prefix)
 	}
-	if assert.Contains(t, n.router.IO, state.NodeId("C")) {
-		assert.Contains(t, n.router.IO["C"].Updates, prefix)
+	if assert.Contains(t, n.router.IO, cLink) {
+		assert.Contains(t, n.router.IO[cLink].Updates, prefix)
 	}
 
-	n.router.IO = make(map[state.NodeId]*IOPending)
+	n.router.IO = make(map[state.LinkID]*IOPending)
 	n.BroadcastRequestSeqno(src, 1, 64)
-	if assert.Contains(t, n.router.IO, state.NodeId("B")) {
-		assert.Contains(t, n.router.IO["B"].SeqnoReq, src)
+	if assert.Contains(t, n.router.IO, bLink) {
+		assert.Contains(t, n.router.IO[bLink].SeqnoReq, src)
 	}
-	if assert.Contains(t, n.router.IO, state.NodeId("C")) {
-		assert.Contains(t, n.router.IO["C"].SeqnoReq, src)
+	if assert.Contains(t, n.router.IO, cLink) {
+		assert.Contains(t, n.router.IO[cLink].SeqnoReq, src)
 	}
 }
 

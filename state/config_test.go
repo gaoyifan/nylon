@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -148,4 +149,45 @@ func TestParseGraph_InvalidGraph(t *testing.T) {
 	failGraph(t, `1,2,3,4,5,6,7,8,9,10,11,12,13,14,15`)
 	failGraph(t, `,,,,,,,,,,,,,,,,`)
 	failGraph(t, `a=a`)
+}
+
+func TestStructuredEndpointsAndLocalBindsParse(t *testing.T) {
+	data := []byte(`
+key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+id: alice
+port: 57175
+binds:
+  - id: default
+  - id: wan0
+    interface: eth0
+    source: 203.0.113.10
+`)
+	var local LocalCfg
+	err := yaml.Unmarshal(data, &local)
+	assert.NoError(t, err)
+	assert.Len(t, local.NormalizedBinds(), 2)
+	assert.Equal(t, LocalBindID("wan0"), local.NormalizedBinds()[1].ID)
+
+	centralData := []byte(`
+routers:
+  - id: alice
+    pubkey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    endpoints:
+      - id: public
+        address: alice.example.com:57175
+      - "192.0.2.10:57175"
+graph:
+  - alice, bob
+clients:
+  - id: bob
+    pubkey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+`)
+	var central CentralCfg
+	err = yaml.Unmarshal(centralData, &central)
+	assert.NoError(t, err)
+	assert.Len(t, central.Routers[0].Endpoints, 2)
+	assert.Equal(t, RemoteEndpointID("public"), central.Routers[0].Endpoints[0].ID)
+	assert.Equal(t, "alice.example.com:57175", central.Routers[0].Endpoints[0].Value)
+	assert.Empty(t, central.Routers[0].Endpoints[1].ID)
+	assert.Equal(t, "192.0.2.10:57175", central.Routers[0].Endpoints[1].Value)
 }

@@ -198,16 +198,15 @@ func (n *Nylon) syncWireGuardEndpoints() error {
 			continue
 		}
 		pcfg := n.GetRouter(peer)
-		nhNeigh := n.RouterState.GetNeighbour(peer)
 		eps := make([]conn.Endpoint, 0)
 
-		if nhNeigh != nil {
-			links := slices.Clone(nhNeigh.Eps)
-			slices.SortStableFunc(links, func(a, b state.Endpoint) int {
-				return cmp.Compare(a.Metric(), b.Metric())
+		links := n.RouterState.GetPeerLinks(peer)
+		if len(links) > 0 {
+			slices.SortStableFunc(links, func(a, b *state.Link) int {
+				return cmp.Compare(a.Endpoint.Metric(), b.Endpoint.Metric())
 			})
-			for _, ep := range links {
-				nep, err := ep.AsNylonEndpoint().GetWgEndpoint(n.Device)
+			for _, link := range links {
+				nep, err := link.Endpoint.AsNylonEndpoint().GetWgEndpoint(n.Device)
 				if err != nil {
 					continue
 				}

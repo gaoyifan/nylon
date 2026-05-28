@@ -54,6 +54,24 @@ func setSrc(ep *StdNetEndpoint, addr netip.Addr, ifidx int32) {
 }
 
 func Test_setSrcControl(t *testing.T) {
+	t.Run("SetSrcStoresPacketInfo", func(t *testing.T) {
+		ep := &StdNetEndpoint{
+			AddrPort: netip.MustParseAddrPort("127.0.0.1:1234"),
+		}
+		ep.SetSrc(netip.MustParseAddr("127.0.0.1"), 5)
+
+		control := make([]byte, stickyControlSize)
+		setSrcControl(&control, ep)
+
+		info := (*unix.Inet4Pktinfo)(unsafe.Pointer(&control[unix.CmsgLen(0)]))
+		if info.Spec_dst != [4]byte{127, 0, 0, 1} {
+			t.Errorf("unexpected address: %v", info.Spec_dst)
+		}
+		if info.Ifindex != 5 {
+			t.Errorf("unexpected ifindex: %d", info.Ifindex)
+		}
+	})
+
 	t.Run("IPv4", func(t *testing.T) {
 		ep := &StdNetEndpoint{
 			AddrPort: netip.MustParseAddrPort("127.0.0.1:1234"),

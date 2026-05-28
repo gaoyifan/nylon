@@ -26,8 +26,8 @@ func scanPassivePeers(n *Nylon) error {
 			hasOtherAdvertisers := false
 			ncfg := n.GetNode(*nid)
 			for _, prefix := range ncfg.Prefixes {
-				for _, neigh := range n.RouterState.Neighbours {
-					for _, route := range neigh.Routes {
+				for _, link := range n.RouterState.LinkList() {
+					for _, route := range link.Routes {
 						if route.Prefix == prefix.GetPrefix() && route.NodeId != n.LocalCfg.Id && route.FD.Metric != state.INF {
 							hasOtherAdvertisers = true
 							goto foundAdvertiser

@@ -23,6 +23,13 @@ type Endpoint interface {
 	AsNylonEndpoint() *NylonEndpoint
 }
 
+func SameIPFamily(a, b netip.Addr) bool {
+	if !a.IsValid() || !b.IsValid() {
+		return true
+	}
+	return a.BitLen() == b.BitLen()
+}
+
 /*
 		DynamicEndpoint represents either an ip:port or a dns name. This may be resolved to a different address at any time
 
@@ -32,6 +39,7 @@ type Endpoint interface {
 		- SRV record: _nylon._udp.example.com. port: 8000 target: nylon3.example.com -> resolves to <ip>:8000
 */
 type DynamicEndpoint struct {
+	ID         RemoteEndpointID `yaml:"id,omitempty"`
 	Value      string
 	lastValue  netip.AddrPort
 	lastUpdate time.Time
@@ -43,6 +51,34 @@ func NewDynamicEndpoint(value string) *DynamicEndpoint {
 		Value: value,
 		rw:    &sync.RWMutex{},
 	}
+}
+
+func (ep *DynamicEndpoint) Clone() *DynamicEndpoint {
+	if ep == nil {
+		return nil
+	}
+	if ep.rw == nil {
+		ep.rw = &sync.RWMutex{}
+	}
+	ep.rw.RLock()
+	defer ep.rw.RUnlock()
+	return &DynamicEndpoint{
+		ID:         ep.ID,
+		Value:      ep.Value,
+		lastValue:  ep.lastValue,
+		lastUpdate: ep.lastUpdate,
+		rw:         &sync.RWMutex{},
+	}
+}
+
+func (ep *DynamicEndpoint) SetResolved(ap netip.AddrPort) {
+	if ep.rw == nil {
+		ep.rw = &sync.RWMutex{}
+	}
+	ep.rw.Lock()
+	defer ep.rw.Unlock()
+	ep.lastValue = ap
+	ep.lastUpdate = time.Now()
 }
 
 func (ep *DynamicEndpoint) Parse() (host string, port uint16, err error) {
@@ -140,15 +176,32 @@ func (ep *DynamicEndpoint) String() string {
 
 func (ep *DynamicEndpoint) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	var s string
-	if err := unmarshal(&s); err != nil {
+	if err := unmarshal(&s); err == nil {
+		ep.Value = s
+		ep.rw = &sync.RWMutex{}
+		return nil
+	}
+
+	var structured struct {
+		ID      RemoteEndpointID `yaml:"id"`
+		Address string           `yaml:"address"`
+	}
+	if err := unmarshal(&structured); err != nil {
 		return err
 	}
-	ep.Value = s
+	ep.ID = structured.ID
+	ep.Value = structured.Address
 	ep.rw = &sync.RWMutex{}
 	return nil
 }
 
 func (ep *DynamicEndpoint) MarshalYAML() (interface{}, error) {
+	if ep.ID != "" {
+		return map[string]string{
+			"id":      string(ep.ID),
+			"address": ep.Value,
+		}, nil
+	}
 	return ep.Value, nil
 }
 
@@ -164,10 +217,23 @@ type NylonEndpoint struct {
 	remoteInit    bool
 	WgEndpoint    conn.Endpoint
 	DynEP         *DynamicEndpoint
+	LocalBind     LocalBindID
+	Bind          LocalBind
+	Generation    uint64
 }
 
 func (ep *NylonEndpoint) AsNylonEndpoint() *NylonEndpoint {
 	return ep
+}
+
+func (ep *NylonEndpoint) RemoteEndpointID() RemoteEndpointID {
+	if ep == nil || ep.DynEP == nil {
+		return ""
+	}
+	if ep.DynEP.ID != "" {
+		return ep.DynEP.ID
+	}
+	return RemoteEndpointID(ep.DynEP.Value)
 }
 
 func (ep *NylonEndpoint) GetWgEndpoint(device *device.Device) (conn.Endpoint, error) {
@@ -175,11 +241,27 @@ func (ep *NylonEndpoint) GetWgEndpoint(device *device.Device) (conn.Endpoint, er
 	if err != nil {
 		return nil, err
 	}
+	if !SameIPFamily(ep.Bind.Source, ap.Addr()) {
+		return nil, fmt.Errorf("bind source %s does not match endpoint %s", ep.Bind.Source, ap)
+	}
 
 	if ep.WgEndpoint == nil || ep.WgEndpoint.DstIPPort() != ap {
 		wgEp, err := device.Bind().ParseEndpoint(ap.String())
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse endpoint: %s, %v", ap.String(), err)
+		}
+		if setter, ok := wgEp.(interface {
+			SetSrc(netip.Addr, int32)
+		}); ok && (ep.Bind.Source.IsValid() || ep.Bind.Interface != "") {
+			ifidx := int32(0)
+			if ep.Bind.Interface != "" {
+				iface, err := net.InterfaceByName(ep.Bind.Interface)
+				if err != nil {
+					return nil, fmt.Errorf("failed to resolve bind interface %s: %w", ep.Bind.Interface, err)
+				}
+				ifidx = int32(iface.Index)
+			}
+			setter.SetSrc(ep.Bind.Source, ifidx)
 		}
 		ep.WgEndpoint = wgEp
 	}
@@ -231,6 +313,8 @@ func NewEndpoint(endpoint *DynamicEndpoint, remoteInit bool, wgEndpoint conn.End
 		remoteInit: remoteInit,
 		WgEndpoint: wgEndpoint,
 		DynEP:      endpoint,
+		LocalBind:  DefaultLocalBindID,
+		Bind:       LocalBind{ID: DefaultLocalBindID},
 		history:    make([]time.Duration, 0),
 		expRTT:     math.Inf(1),
 	}

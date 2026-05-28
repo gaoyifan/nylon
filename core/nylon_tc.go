@@ -59,6 +59,7 @@ func (n *Nylon) InstallTC() {
 					return device.TcDrop, nil
 				}
 				packet.ToPeer = entry.Peer
+				packet.ToEp = entry.Endpoint
 				if n.DBG_trace_tc {
 					t.Submit(fmt.Sprintf("Fwd packet: %v -> %v, via %s\n", packet.GetSrc(), packet.GetDst(), entry.Nh))
 				}
@@ -75,6 +76,7 @@ func (n *Nylon) InstallTC() {
 					return device.TcDrop, nil
 				}
 				packet.ToPeer = entry.Peer
+				packet.ToEp = entry.Endpoint
 				if n.DBG_trace_tc {
 					t.Submit(fmt.Sprintf("Fwd packet: %v -> %v, via %s\n", packet.GetSrc(), packet.GetDst(), entry.Nh))
 				}
@@ -187,18 +189,25 @@ func (n *Nylon) handleNylonPacket(packet []byte, endpoint conn.Endpoint, peer *d
 	}()
 
 	for _, pkt := range bundle.Packets {
+		linkID, ok := n.ResolveIncomingLink(neigh, endpoint)
+		if !ok {
+			if _, isProbe := pkt.Type.(*protocol.Ny_ProbeOp); !isProbe {
+				n.Log.Debug("dropped nylon packet from unknown link", "peer", neigh, "endpoint", endpoint.DstToString())
+				continue
+			}
+		}
 		switch pkt.Type.(type) {
 		case *protocol.Ny_SeqnoRequestOp:
 			n.Dispatch(func() error {
-				return n.routerHandleSeqnoRequest(neigh, pkt.GetSeqnoRequestOp())
+				return n.routerHandleSeqnoRequest(linkID, pkt.GetSeqnoRequestOp())
 			})
 		case *protocol.Ny_RouteOp:
 			n.Dispatch(func() error {
-				return n.routerHandleRouteUpdate(neigh, pkt.GetRouteOp())
+				return n.routerHandleRouteUpdate(linkID, pkt.GetRouteOp())
 			})
 		case *protocol.Ny_AckRetractOp:
 			n.Dispatch(func() error {
-				return n.routerHandleAckRetract(neigh, pkt.GetAckRetractOp())
+				return n.routerHandleAckRetract(linkID, pkt.GetAckRetractOp())
 			})
 		case *protocol.Ny_ProbeOp:
 			// we don't want to wait for dispatch before responding to this packet

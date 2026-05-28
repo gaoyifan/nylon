@@ -2,22 +2,18 @@ package core
 
 func nylonGc(n *Nylon) error {
 	// scan for dead links
-	for _, neigh := range n.RouterState.Neighbours {
-		// filter dplinks
-		count := 0
-		for _, x := range neigh.Eps {
-			x := x.AsNylonEndpoint()
-			if !x.IsActive() {
-				x.DynEP.Clear()
-			}
-			if x.IsAlive() {
-				neigh.Eps[count] = x
-				count++
-			} else {
-				n.Log.Debug("removed dead endpoint", "ep", x.DynEP.String(), "to", neigh.Id)
-			}
+	for _, link := range n.RouterState.LinkList() {
+		x := link.Endpoint.AsNylonEndpoint()
+		if x == nil {
+			continue
 		}
-		neigh.Eps = neigh.Eps[:count]
+		if !x.IsActive() {
+			x.DynEP.Clear()
+		}
+		if !x.IsAlive() {
+			n.Log.Debug("removed dead endpoint", "ep", x.DynEP.String(), "link", link.ID.String())
+			n.RouterState.RemoveLink(link.ID)
+		}
 	}
 
 	err := n.GcRouter()

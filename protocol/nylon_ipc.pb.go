@@ -584,8 +584,11 @@ type EndpointInfo struct {
 	Active          bool                   `protobuf:"varint,3,opt,name=active,proto3" json:"active,omitempty"`
 	RemoteInit      bool                   `protobuf:"varint,4,opt,name=remote_init,json=remoteInit,proto3" json:"remote_init,omitempty"`
 	Metric          uint32                 `protobuf:"varint,5,opt,name=metric,proto3" json:"metric,omitempty"`
+	BindId          string                 `protobuf:"bytes,6,opt,name=bind_id,json=bindId,proto3" json:"bind_id,omitempty"`
 	FilteredRttNs   int64                  `protobuf:"varint,7,opt,name=filtered_rtt_ns,json=filteredRttNs,proto3" json:"filtered_rtt_ns,omitempty"`
 	StabilizedRttNs int64                  `protobuf:"varint,8,opt,name=stabilized_rtt_ns,json=stabilizedRttNs,proto3" json:"stabilized_rtt_ns,omitempty"`
+	BindInterface   *string                `protobuf:"bytes,9,opt,name=bind_interface,json=bindInterface,proto3,oneof" json:"bind_interface,omitempty"`
+	BindSource      *string                `protobuf:"bytes,10,opt,name=bind_source,json=bindSource,proto3,oneof" json:"bind_source,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -655,6 +658,13 @@ func (x *EndpointInfo) GetMetric() uint32 {
 	return 0
 }
 
+func (x *EndpointInfo) GetBindId() string {
+	if x != nil {
+		return x.BindId
+	}
+	return ""
+}
+
 func (x *EndpointInfo) GetFilteredRttNs() int64 {
 	if x != nil {
 		return x.FilteredRttNs
@@ -667,6 +677,20 @@ func (x *EndpointInfo) GetStabilizedRttNs() int64 {
 		return x.StabilizedRttNs
 	}
 	return 0
+}
+
+func (x *EndpointInfo) GetBindInterface() string {
+	if x != nil && x.BindInterface != nil {
+		return *x.BindInterface
+	}
+	return ""
+}
+
+func (x *EndpointInfo) GetBindSource() string {
+	if x != nil && x.BindSource != nil {
+		return *x.BindSource
+	}
+	return ""
 }
 
 type WireGuardPeerStats struct {
@@ -1799,17 +1823,24 @@ const file_protocol_nylon_ipc_proto_rawDesc = "" +
 	"\x06metric\x18\x03 \x01(\rR\x06metric\x12\x1f\n" +
 	"\vexpiry_unix\x18\x04 \x01(\x03R\n" +
 	"expiryUnix\x12!\n" +
-	"\fpassive_hold\x18\x05 \x01(\bR\vpassiveHold\"\xfb\x01\n" +
+	"\fpassive_hold\x18\x05 \x01(\bR\vpassiveHold\"\x89\x03\n" +
 	"\fEndpointInfo\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x1f\n" +
 	"\bresolved\x18\x02 \x01(\tH\x00R\bresolved\x88\x01\x01\x12\x16\n" +
 	"\x06active\x18\x03 \x01(\bR\x06active\x12\x1f\n" +
 	"\vremote_init\x18\x04 \x01(\bR\n" +
 	"remoteInit\x12\x16\n" +
-	"\x06metric\x18\x05 \x01(\rR\x06metric\x12&\n" +
+	"\x06metric\x18\x05 \x01(\rR\x06metric\x12\x17\n" +
+	"\abind_id\x18\x06 \x01(\tR\x06bindId\x12&\n" +
 	"\x0ffiltered_rtt_ns\x18\a \x01(\x03R\rfilteredRttNs\x12*\n" +
-	"\x11stabilized_rtt_ns\x18\b \x01(\x03R\x0fstabilizedRttNsB\v\n" +
-	"\t_resolved\"\xf0\x01\n" +
+	"\x11stabilized_rtt_ns\x18\b \x01(\x03R\x0fstabilizedRttNs\x12*\n" +
+	"\x0ebind_interface\x18\t \x01(\tH\x01R\rbindInterface\x88\x01\x01\x12$\n" +
+	"\vbind_source\x18\n" +
+	" \x01(\tH\x02R\n" +
+	"bindSource\x88\x01\x01B\v\n" +
+	"\t_resolvedB\x11\n" +
+	"\x0f_bind_interfaceB\x0e\n" +
+	"\f_bind_source\"\xf0\x01\n" +
 	"\x12WireGuardPeerStats\x122\n" +
 	"\x15latest_handshake_unix\x18\x01 \x01(\x03R\x13latestHandshakeUnix\x12\x19\n" +
 	"\btx_bytes\x18\x02 \x01(\x04R\atxBytes\x12\x19\n" +

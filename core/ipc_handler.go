@@ -188,7 +188,7 @@ func buildNeighbours(n *Nylon, wgStats map[state.NyPublicKey]device.PeerStatus) 
 		routes := make([]*protocol.NeighRoute, 0)
 		if neigh != nil {
 			eps = buildEndpoints(neigh)
-			routes = buildNeighRoutes(neigh)
+			routes = buildNeighRoutes(n, id)
 		}
 		stat := wgStats[cfg.PubKey]
 		neighbours = append(neighbours, &protocol.NeighbourInfo{
@@ -212,12 +212,23 @@ func buildEndpoints(neigh *state.Neighbour) []*protocol.EndpointInfo {
 		if ap, err := nep.DynEP.Get(); err == nil {
 			resolved = stringPtr(ap.String())
 		}
+		var bindInterface *string
+		if nep.Bind.Interface != "" {
+			bindInterface = stringPtr(nep.Bind.Interface)
+		}
+		var bindSource *string
+		if nep.Bind.Source.IsValid() {
+			bindSource = stringPtr(nep.Bind.Source.String())
+		}
 		eps = append(eps, &protocol.EndpointInfo{
 			Address:         nep.DynEP.Value,
 			Resolved:        resolved,
 			Active:          ep.IsActive(),
 			RemoteInit:      ep.IsRemote(),
 			Metric:          ep.Metric(),
+			BindId:          string(nep.LocalBind),
+			BindInterface:   bindInterface,
+			BindSource:      bindSource,
 			FilteredRttNs:   int64(nep.FilteredPing()),
 			StabilizedRttNs: int64(nep.StabilizedPing()),
 		})
@@ -226,15 +237,25 @@ func buildEndpoints(neigh *state.Neighbour) []*protocol.EndpointInfo {
 		if cmpMetric := cmp.Compare(a.Metric, b.Metric); cmpMetric != 0 {
 			return cmpMetric
 		}
-		return cmp.Compare(a.Address, b.Address)
+		if cmpAddress := cmp.Compare(a.Address, b.Address); cmpAddress != 0 {
+			return cmpAddress
+		}
+		return cmp.Compare(a.BindId, b.BindId)
 	})
 	return eps
 }
 
-func buildNeighRoutes(neigh *state.Neighbour) []*protocol.NeighRoute {
-	routes := make([]*protocol.NeighRoute, 0, len(neigh.Routes))
-	for _, route := range neigh.Routes {
-		routes = append(routes, neighRouteProto(route))
+func buildNeighRoutes(n *Nylon, peer state.NodeId) []*protocol.NeighRoute {
+	links := n.RouterState.GetPeerLinks(peer)
+	routeCount := 0
+	for _, link := range links {
+		routeCount += len(link.Routes)
+	}
+	routes := make([]*protocol.NeighRoute, 0, routeCount)
+	for _, link := range links {
+		for _, route := range link.Routes {
+			routes = append(routes, neighRouteProto(route))
+		}
 	}
 	slices.SortFunc(routes, func(a, b *protocol.NeighRoute) int {
 		return comparePubRoute(a.PubRoute, b.PubRoute)
@@ -357,7 +378,7 @@ func neighRouteProto(route state.NeighRoute) *protocol.NeighRoute {
 func selRouteProto(route state.SelRoute) *protocol.SelRoute {
 	retractedBy := make([]string, 0, len(route.RetractedBy))
 	for _, id := range route.RetractedBy {
-		retractedBy = append(retractedBy, string(id))
+		retractedBy = append(retractedBy, id.String())
 	}
 	slices.Sort(retractedBy)
 	return &protocol.SelRoute{

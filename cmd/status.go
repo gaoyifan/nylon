@@ -224,7 +224,7 @@ func bestEndpoint(endpoints []*protocol.EndpointInfo) *protocol.EndpointInfo {
 }
 
 func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, best *protocol.EndpointInfo, full bool) {
-	headers := []string{"address", "resolved", "metric", "state"}
+	headers := []string{"address", "bind", "resolved", "metric", "state"}
 	if full {
 		headers = append(headers, "rtt", "stable rtt")
 	}
@@ -234,13 +234,27 @@ func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, best *p
 		if ep.Resolved != nil {
 			resolved = *ep.Resolved
 		}
-		row := []string{ep.Address, resolved, metricText(p, ep.Metric), endpointFlags(p, ep, best)}
+		row := []string{ep.Address, endpointBind(ep), resolved, metricText(p, ep.Metric), endpointFlags(p, ep, best)}
 		if full {
 			row = append(row, formatDurationNs(ep.FilteredRttNs), formatDurationNs(ep.StabilizedRttNs))
 		}
 		rows = append(rows, row)
 	}
 	printTable(p, 3, headers, rows)
+}
+
+func endpointBind(ep *protocol.EndpointInfo) string {
+	if ep == nil {
+		return ""
+	}
+	parts := []string{ep.BindId}
+	if ep.BindInterface != nil && *ep.BindInterface != "" {
+		parts = append(parts, "if="+*ep.BindInterface)
+	}
+	if ep.BindSource != nil && *ep.BindSource != "" {
+		parts = append(parts, "src="+*ep.BindSource)
+	}
+	return strings.Join(parts, " ")
 }
 
 func printNeighRoutes(p paletteValues, neigh string, routes []*protocol.NeighRoute, full bool) {

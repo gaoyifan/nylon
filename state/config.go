@@ -64,6 +64,20 @@ type LocalCfg struct {
 	PreDown          []string              `yaml:"pre_down,omitempty"`           // a list of commands executed in order before the nylon interface is brought down
 	PostUp           []string              `yaml:"post_up,omitempty"`            // a list of commands executed in order after the nylon interface is brought up
 	PostDown         []string              `yaml:"post_down,omitempty"`          // a list of commands executed in order after the nylon interface is brought down
+	Binds            []LocalBind           `yaml:"binds,omitempty"`              // local link selectors for multi-link routing
+}
+
+type LocalBind struct {
+	ID        LocalBindID `yaml:"id"`
+	Interface string      `yaml:"interface,omitempty"`
+	Source    netip.Addr  `yaml:"source,omitempty"`
+}
+
+func (c *LocalCfg) NormalizedBinds() []LocalBind {
+	if len(c.Binds) == 0 {
+		return []LocalBind{{ID: DefaultLocalBindID}}
+	}
+	return c.Binds
 }
 
 func (c *CentralCfg) Clone() (error, *CentralCfg) {

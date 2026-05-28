@@ -10,6 +10,82 @@ import (
 	"github.com/encodeous/nylon/state"
 )
 
+type linkTransportKey struct {
+	LocalBind state.LocalBindID
+	Remote    netip.AddrPort
+}
+
+func bindMatchesEndpointFamily(bind state.LocalBind, ep *state.DynamicEndpoint) bool {
+	if ep == nil || !bind.Source.IsValid() {
+		return true
+	}
+	ap, err := ep.Get()
+	if err != nil {
+		return true
+	}
+	return state.SameIPFamily(bind.Source, ap.Addr())
+}
+
+func transportKeyFor(localBind state.LocalBindID, ep *state.DynamicEndpoint) (linkTransportKey, bool) {
+	if ep == nil {
+		return linkTransportKey{}, false
+	}
+	ap, err := ep.Get()
+	if err != nil {
+		return linkTransportKey{}, false
+	}
+	return linkTransportKey{LocalBind: localBind, Remote: ap}, true
+}
+
+func findBind(binds []state.LocalBind, id state.LocalBindID) (state.LocalBind, bool) {
+	for _, bind := range binds {
+		if bind.ID == id {
+			return bind, true
+		}
+	}
+	return state.LocalBind{}, false
+}
+
+// newConfiguredEndpoint creates a local (non-remote) endpoint for ep bound to
+// the given local bind.
+func newConfiguredEndpoint(ep *state.DynamicEndpoint, bind state.LocalBind, t *state.RouterTunables) *state.NylonEndpoint {
+	nep := state.NewEndpoint(ep.Clone(), false, nil, t)
+	nep.LocalBind = bind.ID
+	nep.Bind = bind
+	return nep
+}
+
+// newPeerLink builds the routing link that carries nep towards peer.
+func newPeerLink(peer state.NodeId, nep *state.NylonEndpoint) *state.Link {
+	return &state.Link{
+		ID:       state.LinkID{Peer: peer, LocalBind: nep.LocalBind, RemoteEndpoint: nep.RemoteEndpointID(), Generation: nep.Generation},
+		Peer:     peer,
+		Endpoint: nep,
+		Routes:   make(map[netip.Prefix]state.NeighRoute),
+	}
+}
+
+// eachBindEndpoint invokes fn for every (bind, endpoint) pair whose IP families
+// match and whose (bind, resolved remote) transport tuple is seen for the first
+// time, i.e. the deduplicated local-bind × remote-endpoint product.
+func eachBindEndpoint(binds []state.LocalBind, eps []*state.DynamicEndpoint, fn func(state.LocalBind, *state.DynamicEndpoint)) {
+	seenTransport := make(map[linkTransportKey]struct{}, len(eps)*len(binds))
+	for _, bind := range binds {
+		for _, ep := range eps {
+			if !bindMatchesEndpointFamily(bind, ep) {
+				continue
+			}
+			if key, ok := transportKeyFor(bind.ID, ep); ok {
+				if _, exists := seenTransport[key]; exists {
+					continue
+				}
+				seenTransport[key] = struct{}{}
+			}
+			fn(bind, ep)
+		}
+	}
+}
+
 type ApplyResult string
 
 const (
@@ -62,15 +138,38 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 	}
 
 	neighs := make([]*state.Neighbour, 0, len(desired))
+	nextLinks := make(map[state.LinkID]*state.Link)
 	for _, neigh := range n.RouterState.Neighbours {
 		cfg, ok := desired[neigh.Id]
 		if !ok {
 			// remove old neighbours
-			delete(n.router.IO, neigh.Id)
+			for _, link := range n.RouterState.GetPeerLinks(neigh.Id) {
+				delete(n.router.IO, link.ID)
+			}
 			continue
 		}
 		// configure existing neighbours
-		reconcileConfiguredEndpoints(neigh, cfg.Endpoints, &n.RouterTunables)
+		reconcileConfiguredEndpoints(neigh, cfg.Endpoints, n.LocalCfg.NormalizedBinds(), &n.RouterTunables)
+		for idx, ep := range neigh.Eps {
+			link := n.RouterState.GetLinkForEndpoint(neigh.Id, ep)
+			if link == nil {
+				nep := ep.AsNylonEndpoint()
+				if nep.LocalBind == "" {
+					nep.LocalBind = state.DefaultLocalBindID
+				}
+				if bind, ok := findBind(n.LocalCfg.NormalizedBinds(), nep.LocalBind); ok {
+					if nep.Bind != bind {
+						nep.WgEndpoint = nil
+					}
+					nep.Bind = bind
+				}
+				link = newPeerLink(neigh.Id, nep)
+				if idx == 0 {
+					neigh.Routes = link.Routes
+				}
+			}
+			nextLinks[link.ID] = link
+		}
 		neighs = append(neighs, neigh)
 		delete(desired, neigh.Id)
 	}
@@ -88,12 +187,19 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 			Routes: make(map[netip.Prefix]state.NeighRoute),
 			Eps:    make([]state.Endpoint, 0, len(cfg.Endpoints)),
 		}
-		for _, ep := range cfg.Endpoints {
-			stNeigh.Eps = append(stNeigh.Eps, state.NewEndpoint(ep, false, nil, &n.RouterTunables))
-		}
+		eachBindEndpoint(n.LocalCfg.NormalizedBinds(), cfg.Endpoints, func(bind state.LocalBind, ep *state.DynamicEndpoint) {
+			nep := newConfiguredEndpoint(ep, bind, &n.RouterTunables)
+			stNeigh.Eps = append(stNeigh.Eps, nep)
+			link := newPeerLink(id, nep)
+			if len(stNeigh.Eps) == 1 {
+				stNeigh.Routes = link.Routes
+			}
+			nextLinks[link.ID] = link
+		})
 		neighs = append(neighs, stNeigh)
 	}
 	n.RouterState.Neighbours = neighs
+	n.RouterState.Links = nextLinks
 
 	// rebuild pubkey to peer's id mapping
 	pubkeyMap := make(map[state.NyPublicKey]state.NodeId)
@@ -107,14 +213,15 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 	return nil
 }
 
-func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.DynamicEndpoint, t *state.RouterTunables) {
+func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.DynamicEndpoint, binds []state.LocalBind, t *state.RouterTunables) {
 	desiredByValue := make(map[string]*state.DynamicEndpoint, len(desired))
 	for _, ep := range desired {
 		desiredByValue[ep.Value] = ep
 	}
 
 	eps := make([]state.Endpoint, 0, len(neigh.Eps)+len(desired))
-	seen := make(map[string]struct{}, len(desired))
+	seen := make(map[state.LinkID]struct{}, len(desired)*len(binds))
+	seenTransport := make(map[linkTransportKey]struct{}, len(desired)*len(binds))
 	for _, ep := range neigh.Eps {
 		nep := ep.AsNylonEndpoint()
 		if ep.IsRemote() {
@@ -122,16 +229,52 @@ func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []*state.Dynam
 			continue
 		}
 		// only keep if desired
-		if desiredEp, ok := desiredByValue[nep.DynEP.Value]; ok {
+		if _, ok := desiredByValue[nep.DynEP.Value]; ok {
+			localBind := nep.LocalBind
+			if localBind == "" {
+				localBind = state.DefaultLocalBindID
+				nep.LocalBind = localBind
+			}
+			if bind, ok := findBind(binds, localBind); ok {
+				if nep.Bind != bind {
+					nep.WgEndpoint = nil
+				}
+				nep.Bind = bind
+			}
+			if !bindMatchesEndpointFamily(nep.Bind, nep.DynEP) {
+				continue
+			}
+			id := state.LinkID{Peer: neigh.Id, LocalBind: localBind, RemoteEndpoint: nep.RemoteEndpointID(), Generation: nep.Generation}
+			if key, ok := transportKeyFor(localBind, nep.DynEP); ok {
+				if _, exists := seenTransport[key]; exists {
+					continue
+				}
+				seenTransport[key] = struct{}{}
+			}
 			eps = append(eps, ep)
-			seen[desiredEp.Value] = struct{}{}
+			seen[id] = struct{}{}
 		}
 	}
-	for _, ep := range desired {
-		if _, ok := seen[ep.Value]; ok {
-			continue
+	for _, bind := range binds {
+		for _, ep := range desired {
+			if !bindMatchesEndpointFamily(bind, ep) {
+				continue
+			}
+			id := state.LinkID{Peer: neigh.Id, LocalBind: bind.ID, RemoteEndpoint: ep.ID}
+			if id.RemoteEndpoint == "" {
+				id.RemoteEndpoint = state.RemoteEndpointID(ep.Value)
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			if key, ok := transportKeyFor(bind.ID, ep); ok {
+				if _, exists := seenTransport[key]; exists {
+					continue
+				}
+				seenTransport[key] = struct{}{}
+			}
+			eps = append(eps, newConfiguredEndpoint(ep, bind, t))
 		}
-		eps = append(eps, state.NewEndpoint(ep, false, nil, t))
 	}
 	neigh.Eps = eps
 }

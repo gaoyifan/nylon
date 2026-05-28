@@ -79,7 +79,7 @@ func DefaultRouterTunables() RouterTunables {
 		GcDelay:            time.Millisecond * 1000,
 		LinkDeadThreshold:  5 * probeDelay,
 		RouteExpiryTime:    5 * routeUpdateDelay,
-		LinkSwitchDeadband: 1.1,
+		LinkSwitchDeadband: 1.0,
 
 		ClientKeepaliveInterval: 3 * probeDelay,
 		ClientDeadThreshold:     6 * probeDelay, // 2 * ClientKeepaliveInterval

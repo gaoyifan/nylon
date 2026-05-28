@@ -13,9 +13,11 @@ message Ny {
     bytes Prefix = 2;
     uint32 Seqno = 3;
     uint32 Metric = 4;
+    uint64 RetractionToken = 5;
   }
   message AckRetract {
     bytes Prefix = 1;
+    uint64 Token = 2;
   }
   message SeqnoRequest {
     string RouterId = 1;
