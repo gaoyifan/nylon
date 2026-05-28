@@ -122,6 +122,22 @@ func (n *Nylon) RouterEvent(event string, desc string, args ...any) {
 	n.router.log.Debug(desc, append([]any{"event", event}, args...)...)
 }
 
+func (n *Nylon) ScheduleRouteCompute(delay time.Duration) {
+	if n.router.RouteComputePending.Swap(true) {
+		return
+	}
+	time.AfterFunc(delay, func() {
+		ok := n.Dispatch(func() error {
+			defer n.router.RouteComputePending.Store(false)
+			ComputeRoutes(n.RouterState, n)
+			return nil
+		})
+		if !ok {
+			n.router.RouteComputePending.Store(false)
+		}
+	})
+}
+
 func (n *Nylon) UpdateNeighbour(neigh state.NodeId) {
 	PushFullTableToPeer(n.RouterState, n, neigh)
 }
@@ -342,18 +358,18 @@ func (n *Nylon) checkNode(id state.NodeId) bool {
 }
 
 // packet handlers
-func (n *Nylon) routerHandleRouteUpdate(linkID state.LinkID, update *protocol.Ny_Update) error {
+func (n *Nylon) routerApplyRouteUpdate(linkID state.LinkID, update *protocol.Ny_Update) (bool, error) {
 	prefix := netip.Prefix{}
 	err := prefix.UnmarshalBinary(update.Prefix)
 	if err != nil {
 		n.router.log.Warn("received update with invalid prefix", "prefix", update.Prefix, "err", err)
-		return nil
+		return false, nil
 	}
 	link := n.RouterState.GetLink(linkID)
 	if link == nil ||
 		!n.checkPrefix(prefix) ||
 		!n.checkNode(state.NodeId(update.RouterId)) {
-		return nil
+		return false, nil
 	}
 	HandleLinkUpdate(n.RouterState, n, linkID, state.PubRoute{
 		Source: state.Source{
@@ -366,7 +382,17 @@ func (n *Nylon) routerHandleRouteUpdate(linkID state.LinkID, update *protocol.Ny
 		},
 		RetractionToken: update.GetRetractionToken(),
 	})
-	ComputeRoutes(n.RouterState, n)
+	return true, nil
+}
+
+func (n *Nylon) routerHandleRouteUpdate(linkID state.LinkID, update *protocol.Ny_Update) error {
+	applied, err := n.routerApplyRouteUpdate(linkID, update)
+	if err != nil {
+		return err
+	}
+	if applied {
+		ComputeRoutes(n.RouterState, n)
+	}
 	return nil
 }
 

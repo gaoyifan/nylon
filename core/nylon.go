@@ -44,6 +44,7 @@ type Nylon struct {
 		LastStarvationRequest time.Time
 		IO                    map[state.LinkID]*IOPending
 		SeqnoDedup            *ttlcache.Cache[state.Source, uint16]
+		RouteComputePending   atomic.Bool
 
 		// ForwardTable contains the full routing table
 		ForwardTable atomic.Pointer[bart.Table[RouteTableEntry]]
