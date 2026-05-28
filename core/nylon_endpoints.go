@@ -207,7 +207,9 @@ func handleProbePong(n *Nylon, node state.NodeId, token uint64, ep conn.Endpoint
 			dpLink.Renew()
 			dpLink.UpdatePing(latency)
 			dpLink.WgEndpoint = ep
-			ComputeRoutes(n.RouterState, n)
+			// Probe pongs arrive frequently on multi-link meshes. Coalesce route
+			// recomputation so RTT samples can update without saturating dispatch.
+			n.ScheduleRouteCompute(n.StarvationDelay)
 			return
 		}
 	}

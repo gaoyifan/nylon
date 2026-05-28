@@ -188,6 +188,12 @@ func (n *Nylon) handleNylonPacket(packet []byte, endpoint conn.Endpoint, peer *d
 		}
 	}()
 
+	type controlPacket struct {
+		linkID state.LinkID
+		pkt    *protocol.Ny
+	}
+	controlPackets := make([]controlPacket, 0, len(bundle.Packets))
+
 	for _, pkt := range bundle.Packets {
 		linkID, ok := n.ResolveIncomingLink(neigh, endpoint)
 		if !ok {
@@ -198,20 +204,44 @@ func (n *Nylon) handleNylonPacket(packet []byte, endpoint conn.Endpoint, peer *d
 		}
 		switch pkt.Type.(type) {
 		case *protocol.Ny_SeqnoRequestOp:
-			n.Dispatch(func() error {
-				return n.routerHandleSeqnoRequest(linkID, pkt.GetSeqnoRequestOp())
-			})
+			controlPackets = append(controlPackets, controlPacket{linkID: linkID, pkt: pkt})
 		case *protocol.Ny_RouteOp:
-			n.Dispatch(func() error {
-				return n.routerHandleRouteUpdate(linkID, pkt.GetRouteOp())
-			})
+			controlPackets = append(controlPackets, controlPacket{linkID: linkID, pkt: pkt})
 		case *protocol.Ny_AckRetractOp:
-			n.Dispatch(func() error {
-				return n.routerHandleAckRetract(linkID, pkt.GetAckRetractOp())
-			})
+			controlPackets = append(controlPackets, controlPacket{linkID: linkID, pkt: pkt})
 		case *protocol.Ny_ProbeOp:
 			// we don't want to wait for dispatch before responding to this packet
 			handleProbe(n, pkt.GetProbeOp(), endpoint, peer, neigh)
 		}
 	}
+
+	if len(controlPackets) == 0 {
+		return
+	}
+
+	n.Dispatch(func() error {
+		routeUpdated := false
+		for _, cp := range controlPackets {
+			switch cp.pkt.Type.(type) {
+			case *protocol.Ny_SeqnoRequestOp:
+				if err := n.routerHandleSeqnoRequest(cp.linkID, cp.pkt.GetSeqnoRequestOp()); err != nil {
+					return err
+				}
+			case *protocol.Ny_RouteOp:
+				applied, err := n.routerApplyRouteUpdate(cp.linkID, cp.pkt.GetRouteOp())
+				if err != nil {
+					return err
+				}
+				routeUpdated = routeUpdated || applied
+			case *protocol.Ny_AckRetractOp:
+				if err := n.routerHandleAckRetract(cp.linkID, cp.pkt.GetAckRetractOp()); err != nil {
+					return err
+				}
+			}
+		}
+		if routeUpdated {
+			ComputeRoutes(n.RouterState, n)
+		}
+		return nil
+	})
 }
