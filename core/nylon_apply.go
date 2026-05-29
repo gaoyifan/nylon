@@ -137,6 +137,12 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 		desired[peer] = next.GetRouter(peer)
 	}
 
+	// Materialize existing links before mutating any neighbour's endpoint list
+	// below, so newly added endpoints deterministically build their own link
+	// (with an independent per-link route table) instead of having one derived
+	// from the shared neighbour route table.
+	n.RouterState.EnsureLinkState()
+
 	neighs := make([]*state.Neighbour, 0, len(desired))
 	nextLinks := make(map[state.LinkID]*state.Link)
 	for _, neigh := range n.RouterState.Neighbours {

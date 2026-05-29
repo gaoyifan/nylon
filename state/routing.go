@@ -78,10 +78,16 @@ type RouterState struct {
 	SelfSeqno map[netip.Prefix]uint16
 	Routes    map[netip.Prefix]SelRoute
 	Sources   map[Source]FD
-	// Links are routed adjacencies. Neighbours is retained as a peer-level
-	// compatibility view for older tests and status grouping.
+	// Links is the authoritative set of routed adjacencies. Every mutator
+	// (AddLink, RemoveLink, link rotation, config reconcile) keeps it in sync.
+	// Neighbours is a peer-level view retained for status grouping, the
+	// per-neighbour route table, and older tests.
 	Links      map[LinkID]*Link
 	Neighbours []*Neighbour
+	// linksReady records that Links has already been derived from Neighbours.
+	// It lets EnsureLinkState skip the O(links) rebuild on the hot read paths
+	// (LinkList/GetPeerLinks run on every route computation) once links exist.
+	linksReady bool
 	// Advertised is a map tracking the prefix and the time it will be advertised until
 	Advertised map[netip.Prefix]Advertisement
 }
@@ -198,9 +204,16 @@ func (s *RouterState) GetNeighbour(node NodeId) *Neighbour {
 	return s.Neighbours[nIdx]
 }
 
+// EnsureLinkState makes sure Links is allocated and, the first time it is
+// called for a given set of Neighbours, derives any links that are not already
+// present from the neighbours' endpoints. Links is authoritative afterwards:
+// all mutators maintain it directly, so subsequent calls are a cheap no-op.
 func (s *RouterState) EnsureLinkState() {
 	if s.Links == nil {
 		s.Links = make(map[LinkID]*Link)
+	}
+	if s.linksReady {
+		return
 	}
 	for _, neigh := range s.Neighbours {
 		if neigh.Routes == nil {
@@ -219,6 +232,7 @@ func (s *RouterState) EnsureLinkState() {
 			}
 		}
 	}
+	s.linksReady = true
 }
 
 func endpointLinkID(peer NodeId, ep Endpoint, idx int) LinkID {
