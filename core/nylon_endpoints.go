@@ -15,6 +15,8 @@ import (
 
 type EpPing struct {
 	TimeSent time.Time
+	Node     state.NodeId
+	Endpoint *state.NylonEndpoint
 }
 
 func (n *Nylon) Probe(node state.NodeId, ep *state.NylonEndpoint, waitErr bool) error {
@@ -35,6 +37,8 @@ func (n *Nylon) Probe(node state.NodeId, ep *state.NylonEndpoint, waitErr bool) 
 
 	n.PingBuf.Set(token, EpPing{
 		TimeSent: time.Now(),
+		Node:     node,
+		Endpoint: ep,
 	}, ttlcache.DefaultTTL)
 
 	wg := sync.WaitGroup{}
@@ -130,33 +134,29 @@ func handleProbePing(n *Nylon, node state.NodeId, wgEndpoint conn.Endpoint) {
 }
 
 func handleProbePong(n *Nylon, node state.NodeId, token uint64, ep conn.Endpoint) {
-	// check if link exists
-	for _, neigh := range n.RouterState.Neighbours {
-		for _, dep := range neigh.Eps {
-			dpLink := dep.AsNylonEndpoint()
-			ap, err := dpLink.DynEP.Get()
-			if err == nil && ap == ep.DstIPPort() && neigh.Id == node {
-				linkHealth, ok := n.PingBuf.GetAndDelete(token)
-				if ok {
-					health := linkHealth.Value()
-					latency := time.Since(health.TimeSent)
-					// we have a link
-					if n.DBG_log_probe {
-						n.Log.Debug("probe back", "peer", node, "ping", latency)
-					}
-					dpLink.Renew()
-					dpLink.UpdatePing(latency)
-
-					// update wireguard endpoint
-					dpLink.WgEndpoint = ep
-
-					ComputeRoutes(n.RouterState, n)
-				}
-				return
-			}
-		}
+	linkHealth, ok := n.PingBuf.GetAndDelete(token)
+	if !ok {
+		n.Log.Warn("probe came back and couldn't find token", "from", ep.DstToString(), "node", node)
+		return
 	}
-	n.Log.Warn("probe came back and couldn't find link", "from", ep.DstToString(), "node", node)
+	health := linkHealth.Value()
+	dpLink := health.Endpoint
+	if health.Node != node || dpLink == nil {
+		n.Log.Warn("probe came back for unexpected node", "from", ep.DstToString(), "node", node, "expected", health.Node)
+		return
+	}
+	latency := time.Since(health.TimeSent)
+	// we have a link
+	if n.DBG_log_probe {
+		n.Log.Debug("probe back", "peer", node, "ping", latency)
+	}
+	dpLink.Renew()
+	dpLink.UpdatePing(latency)
+
+	// update wireguard endpoint
+	dpLink.WgEndpoint = ep
+
+	ComputeRoutes(n.RouterState, n)
 }
 
 func (n *Nylon) probeLinks(active bool) error {
