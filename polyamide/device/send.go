@@ -240,8 +240,17 @@ func (device *Device) RoutineReadFromTUN() {
 		rBufs[i] = bufs[i][:]
 	}
 
+	// In PI mode the TUN reports each packet's L3 ethertype, letting us detect
+	// MPLS reliably instead of guessing from the first nibble.
+	protoReader, hasProtos := device.tun.device.(tun.ProtoReader)
+
 	for {
 		count, readErr = device.tun.device.Read(rBufs, sizes, offset)
+
+		var protos []uint16
+		if hasProtos {
+			protos = protoReader.LastReadProtos()
+		}
 
 		for i := 0; i < count; i++ {
 			if sizes[i] < 1 {
@@ -249,6 +258,9 @@ func (device *Device) RoutineReadFromTUN() {
 			}
 			tce := device.GetTCElement()
 			tce.Buffer = bufs[i]
+			if device.MplsUnicastProtoId != 0 && i < len(protos) && protos[i] == tun.EthPMplsUnicast {
+				sizes[i] = tce.FrameMplsUnicast(offset, sizes[i], int(device.MplsUnicastProtoId), int(device.MplsUnicastSubtype))
+			}
 			tce.Packet = bufs[i][offset : offset+sizes[i]]
 			tcBufs = append(tcBufs, tce)
 

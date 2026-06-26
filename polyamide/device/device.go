@@ -69,6 +69,15 @@ type Device struct {
 	indexTable    IndexTable
 	cookieChecker CookieChecker
 
+	// MplsUnicastProtoId / MplsUnicastSubtype, when MplsUnicastProtoId is
+	// non-zero, make the TUN reader re-frame a bare MPLS packet (a single
+	// label-stack entry routed in via `ip route ... encap mpls <label>`,
+	// identified by the tun_pi ETH_P_MPLS_UC ethertype) in place as a poly
+	// unicast packet whose payload is the untouched MPLS bytes. Set before the
+	// device is brought up. See (*TCElement).FrameMplsUnicast.
+	MplsUnicastProtoId byte
+	MplsUnicastSubtype byte
+
 	pool struct {
 		inboundElementsContainer  *WaitPool
 		outboundElementsContainer *WaitPool
