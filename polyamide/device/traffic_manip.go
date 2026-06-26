@@ -14,6 +14,39 @@ const (
 	PolyOffsetPayloadLength = 1
 )
 
+// MplsLseLen is the size of a single MPLS label-stack entry in bytes
+// (20-bit label, 3-bit traffic class, 1-bit bottom-of-stack, 8-bit TTL).
+const MplsLseLen = 4
+
+// FrameMplsUnicast re-frames a bare MPLS packet sitting at
+// Buffer[offset:offset+size] (as just read from the TUN, identified as MPLS via
+// the tun_pi ethertype) in place as a poly unicast packet:
+//
+//	[poly hdr (3B)] [subtype (1B)] [original MPLS bytes ...]
+//
+// The MPLS label-stack entry and its payload are preserved byte-for-byte; only
+// the 4-byte poly+subtype prefix is prepended. Because MPLS carries no length
+// field, the true length is taken from the TUN read here (size) and written
+// into the poly header, so the rest of the pipeline (which derives length from
+// the L3 header) sees a well-formed packet. Returns the new size. The caller is
+// responsible for confirming the packet is MPLS (e.g. via the PI proto).
+func (elem *TCElement) FrameMplsUnicast(offset, size, protoId, subtype int) int {
+	if size < MplsLseLen {
+		return size
+	}
+	const prefix = PolyHeaderSize + 1 // poly header + subtype byte
+	if offset+size+prefix > len(elem.Buffer) {
+		return size // no headroom; leave as-is (will be dropped downstream)
+	}
+	// Shift the MPLS bytes right to make room for the poly+subtype prefix.
+	copy(elem.Buffer[offset+prefix:offset+prefix+size], elem.Buffer[offset:offset+size])
+	elem.Buffer[offset] = byte(protoId << 4)
+	// poly payload length = subtype byte + the MPLS bytes.
+	binary.BigEndian.PutUint16(elem.Buffer[offset+PolyOffsetPayloadLength:offset+PolyOffsetPayloadLength+2], uint16(size+1))
+	elem.Buffer[offset+PolyHeaderSize] = byte(subtype)
+	return size + prefix
+}
+
 func (elem *TCElement) InitPacket(ver int, len uint16) {
 	elem.Packet = elem.Buffer[MessageTransportHeaderSize : MessageTransportHeaderSize+len]
 	elem.SetIPVersion(ver)

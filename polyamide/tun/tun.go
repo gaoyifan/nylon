@@ -17,6 +17,31 @@ const (
 	EventMTUUpdate
 )
 
+// EthPMplsUnicast is the ETH_P_MPLS_UC ethertype, reported via the tun_pi
+// header for MPLS unicast packets when the device runs in PI mode.
+const EthPMplsUnicast uint16 = 0x8847
+
+// ProtoReader is optionally implemented by Devices that can report the L3
+// protocol (ethertype) of each packet from the most recent Read. It is only
+// meaningful for devices opened in packet-information (PI) mode; other devices
+// need not implement it.
+type ProtoReader interface {
+	// LastReadProtos returns a slice parallel to the packets returned by the
+	// most recent Read call; element i is the ethertype of packet i. The
+	// returned slice is owned by the Device and valid until the next Read.
+	LastReadProtos() []uint16
+}
+
+// ProtoWriter is optionally implemented by Devices that can emit non-IP frames
+// (e.g. MPLS) back to the kernel. It is only meaningful for devices opened in
+// packet-information (PI) mode, where the tun_pi proto carries the ethertype.
+type ProtoWriter interface {
+	// WriteWithProtos behaves like Write, but protos[i] is the ethertype of
+	// bufs[i]; a zero entry means "infer from the IP version nibble". protos
+	// may be shorter than bufs (missing entries are treated as zero).
+	WriteWithProtos(bufs [][]byte, offset int, protos []uint16) (int, error)
+}
+
 type Device interface {
 	// File returns the file descriptor of the device.
 	File() *os.File

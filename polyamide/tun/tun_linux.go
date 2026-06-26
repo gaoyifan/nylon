@@ -25,6 +25,10 @@ import (
 const (
 	cloneDevicePath = "/dev/net/tun"
 	ifReqSize       = unix.IFNAMSIZ + 64
+	// tunPILen is the size of the struct tun_pi header ({__u16 flags; __be16
+	// proto;}) that the kernel prepends to every packet when IFF_NO_PI is not
+	// set. The proto field carries the L3 ethertype (e.g. ETH_P_MPLS_UC).
+	tunPILen = 4
 )
 
 type NativeTun struct {
@@ -39,6 +43,7 @@ type NativeTun struct {
 	batchSize               int
 	vnetHdr                 bool
 	udpGSO                  bool
+	pi                      bool // if true, the device runs in packet-information mode (IFF_NO_PI cleared)
 
 	closeOnce sync.Once
 
@@ -46,8 +51,9 @@ type NativeTun struct {
 	nameCache string    // name of interface
 	nameErr   error
 
-	readOpMu sync.Mutex                    // readOpMu guards readBuff
-	readBuff [virtioNetHdrLen + 65535]byte // if vnetHdr every read() is prefixed by virtioNetHdr
+	readOpMu   sync.Mutex                               // readOpMu guards readBuff and lastProtos
+	readBuff   [tunPILen + virtioNetHdrLen + 65535]byte // optionally prefixed by tun_pi and/or virtioNetHdr
+	lastProtos []uint16                                 // L3 ethertype of each packet from the most recent Read (PI mode)
 
 	writeOpMu   sync.Mutex // writeOpMu guards toWrite, tcpGROTable
 	toWrite     []int
@@ -333,6 +339,17 @@ func (tun *NativeTun) nameSlow() (string, error) {
 }
 
 func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
+	return tun.writeWithProtos(bufs, offset, nil)
+}
+
+// WriteWithProtos implements tun.ProtoWriter: protos[i] gives the ethertype of
+// bufs[i] for the tun_pi header (0 => infer from the IP version nibble). This
+// lets callers emit non-IP frames (e.g. MPLS) back to the kernel in PI mode.
+func (tun *NativeTun) WriteWithProtos(bufs [][]byte, offset int, protos []uint16) (int, error) {
+	return tun.writeWithProtos(bufs, offset, protos)
+}
+
+func (tun *NativeTun) writeWithProtos(bufs [][]byte, offset int, protos []uint16) (int, error) {
 	tun.writeOpMu.Lock()
 	defer func() {
 		tun.tcpGROTable.reset()
@@ -355,8 +372,30 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 			tun.toWrite = append(tun.toWrite, i)
 		}
 	}
+	// ipOffset is where the L3 packet starts within each buffer (past any vnet
+	// header). It is used to derive the tun_pi proto from the IP version.
+	ipOffset := offset
+	if tun.vnetHdr {
+		ipOffset += virtioNetHdrLen
+	}
+	if tun.pi {
+		offset -= tunPILen
+	}
 	for _, bufsI := range tun.toWrite {
-		n, err := tun.tunFile.Write(bufs[bufsI][offset:])
+		buf := bufs[bufsI]
+		if tun.pi {
+			proto := uint16(unix.ETH_P_IP)
+			if bufsI < len(protos) && protos[bufsI] != 0 {
+				proto = protos[bufsI]
+			} else if ipOffset < len(buf) && buf[ipOffset]>>4 == 6 {
+				proto = uint16(unix.ETH_P_IPV6)
+			}
+			buf[offset] = 0 // tun_pi flags
+			buf[offset+1] = 0
+			buf[offset+2] = byte(proto >> 8)
+			buf[offset+3] = byte(proto)
+		}
+		n, err := tun.tunFile.Write(buf[offset:])
 		if errors.Is(err, syscall.EBADFD) {
 			return total, os.ErrClosed
 		}
@@ -455,8 +494,10 @@ func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 	case err := <-tun.errors:
 		return 0, err
 	default:
+		// In PI mode the kernel prefixes a tun_pi header, so we must stage
+		// through readBuff to strip it before handing the L3 payload upward.
 		readInto := bufs[0][offset:]
-		if tun.vnetHdr {
+		if tun.vnetHdr || tun.pi {
 			readInto = tun.readBuff[:]
 		}
 		n, err := tun.tunFile.Read(readInto)
@@ -466,12 +507,35 @@ func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 		if err != nil {
 			return 0, err
 		}
-		if tun.vnetHdr {
-			return handleVirtioRead(readInto[:n], bufs, sizes, offset)
-		} else {
-			sizes[0] = n
-			return 1, nil
+		data := readInto[:n]
+		proto := uint16(0)
+		if tun.pi {
+			if len(data) < tunPILen {
+				return 0, fmt.Errorf("read len %d shorter than tun_pi header", len(data))
+			}
+			proto = uint16(data[2])<<8 | uint16(data[3])
+			data = data[tunPILen:]
 		}
+		var count int
+		if tun.vnetHdr {
+			count, err = handleVirtioRead(data, bufs, sizes, offset)
+			if err != nil {
+				return 0, err
+			}
+		} else {
+			if len(data) > len(bufs[0][offset:]) {
+				return 0, fmt.Errorf("read len %d overflows bufs element len %d", len(data), len(bufs[0][offset:]))
+			}
+			copy(bufs[0][offset:], data)
+			sizes[0] = len(data)
+			count = 1
+		}
+		// A single tunFile.Read returns one (possibly GSO-segmented) packet, so
+		// every resulting segment shares the same L3 protocol.
+		for i := 0; i < count && i < len(tun.lastProtos); i++ {
+			tun.lastProtos[i] = proto
+		}
+		return count, nil
 	}
 }
 
@@ -541,10 +605,18 @@ func (tun *NativeTun) initFromFlags(name string) error {
 		} else {
 			tun.batchSize = 1
 		}
+		tun.lastProtos = make([]uint16, tun.batchSize)
 	}); e != nil {
 		return e
 	}
 	return err
+}
+
+// LastReadProtos implements tun.ProtoReader. It returns the L3 ethertype of
+// each packet from the most recent Read call (valid until the next Read). In
+// non-PI mode every entry is zero.
+func (tun *NativeTun) LastReadProtos() []uint16 {
+	return tun.lastProtos
 }
 
 // CreateTUN creates a Device with the provided name and MTU.
@@ -563,7 +635,12 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	}
 	// IFF_VNET_HDR enables the "tun status hack" via routineHackListener()
 	// where a null write will return EINVAL indicating the TUN is up.
-	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
+	//
+	// We deliberately do NOT set IFF_NO_PI: packet-information mode prefixes
+	// every read/write with a 4-byte struct tun_pi whose proto field carries
+	// the L3 ethertype. This lets the dataplane distinguish MPLS (ETH_P_MPLS_UC)
+	// from IPv4/IPv6 reliably instead of guessing from the first nibble.
+	ifr.SetUint16(unix.IFF_TUN | unix.IFF_VNET_HDR)
 	err = unix.IoctlIfreq(nfd, unix.TUNSETIFF, ifr)
 	if err != nil {
 		return nil, err
@@ -578,7 +655,18 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	// Note that the above -- open,ioctl,nonblock -- must happen prior to handing it to netpoll as below this line.
 
 	fd := os.NewFile(uintptr(nfd), cloneDevicePath)
-	return CreateTUNFromFile(fd, mtu)
+	dev, err := CreateTUNFromFile(fd, mtu)
+	if err != nil {
+		return nil, err
+	}
+	// We created the device in packet-information mode (IFF_NO_PI cleared), so
+	// the kernel prefixes every read/write with a tun_pi header. Mark it as
+	// such explicitly: TUNGETIFF does not reliably report the NO_PI bit, so we
+	// cannot infer PI mode from the flag readback in initFromFlags.
+	if nt, ok := dev.(*NativeTun); ok {
+		nt.pi = true
+	}
+	return dev, nil
 }
 
 // CreateTUNFromFile creates a Device from an os.File with the provided MTU.
