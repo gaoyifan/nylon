@@ -22,6 +22,13 @@ log_path: "" # write logs to this file (empty = stderr only)
 interface_name: "" # override the interface name (default: "nylon", or utunX on macOS)
 dns_resolvers: [] # DNS servers for nylon's own lookups, e.g. ["1.1.1.1:53"]
 
+# Exit nodes (a node may be an exit, a client of an exit, both, or neither).
+# See the Exit Nodes reference for the model and per-flow MPLS selection.
+advertise_exit_node: false # accept and terminate exit traffic on this node
+exit_node: "" # route otherwise-unrouted traffic through this remote node id
+exit_node_default_route: false # with exit_node: install 0.0.0.0/0 (full tunnel);
+                               # if false, only destinations routed onto nylon are tunneled
+
 # Local endpoint selectors. Nylon probes each peer endpoint through matching
 # binds and uses the best active link for the routing edge.
 binds:
@@ -71,6 +78,9 @@ routers:
   - id: alice
     pubkey: xmfAovAKN4AY5ocK5s+/VsG9I27KrQ13Vzb0HOsLKAs==
     addresses: [10.0.0.1] # nylon interface addresses (auto-advertised as /32 or /128)
+    # numeric_id: 16 # optional: pin this node's numeric id, which doubles as its
+    #                # MPLS exit label. Must be >= 16 (labels 0-15 are reserved).
+    #                # Un-pinned nodes get the lowest free ids in alphabetical order.
     endpoints:
       - "alice.example.com:57175" # domain name (re-resolved periodically)
       - "192.168.1.2:57175"       # LAN IP
