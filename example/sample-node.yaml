@@ -15,6 +15,19 @@ unexclude_ips: [] # split tunnel, subtracts from centrally excluded ip ranges
 exclude_ips: # split tunnel, adds to the centrally excluded ip ranges
   - 192.168.0.0/24 # e.g here, we exclude the local ip range
 
+# exit-node feature (a node may be an exit, a client of an exit, both, or neither)
+advertise_exit_node: false # Default: false - accept and terminate exit traffic on this node
+exit_node: "" # Default: "" - route otherwise-unrouted traffic through this remote node id
+exit_node_default_route: false # Default: false - when used with exit_node, install 0.0.0.0/0 (full tunnel). If false, only destinations explicitly routed onto nylon are tunneled
+
+# Per-flow exit selection via MPLS (optional, no config needed): a node's binary
+# id is also its MPLS label, so you can steer any traffic out through any
+# exit-advertising node just by routing it into nylon with an MPLS-encap route,
+# e.g. to send fwmark 0x1 traffic out through the node with binary id 5:
+#   ip rule add fwmark 0x1 lookup 101
+#   ip route add default dev nylon0 encap mpls 5 table 101
+# Switch exits at runtime by re-pointing that route's label; no nylon restart.
+
 # for even more flexibility, you may execute commands when the interface starts or stops
 pre_up: []
 pre_down: []

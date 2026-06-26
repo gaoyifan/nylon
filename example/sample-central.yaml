@@ -8,6 +8,9 @@ dist:
 routers:
   - id: alice
     pubkey: xmfAovAKN4AY5ocK5s+/VsG9I27KrQ13Vzb0HOsLKAs==
+    # numeric_id: 16 # optional: pin this node's numeric id, which doubles as its MPLS exit label.
+    #                # must be >= 16 (labels 0-15 are reserved). Nodes without `numeric_id`
+    #                # are assigned the lowest free ids (>=16) in alphabetical order, deterministically.
     addresses: [10.0.0.1] # this is the primary address of the nylon interface, it will be used when sending out packets from the interface
     prefixes:
       - type: static # here, we define a static prefix advertisement

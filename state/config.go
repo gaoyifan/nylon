@@ -16,6 +16,13 @@ type NodeCfg struct {
 	PubKey    NyPublicKey
 	Addresses []netip.Addr          `yaml:",omitempty"`
 	Prefixes  []PrefixHealthWrapper `yaml:",omitempty"`
+
+	// NumericId optionally pins this node's numeric id (which doubles as its
+	// MPLS label for exit selection). Must be >= FirstNodeIdNumeric (16); 0
+	// means "assign automatically". Nodes without an explicit NumericId are
+	// packed into the lowest free slots in alphabetical order. See
+	// BuildNodeIdMap.
+	NumericId NodeIdNumeric `yaml:"numeric_id,omitempty"`
 }
 
 // RouterCfg represents a central representation of a node that can route
@@ -65,6 +72,19 @@ type LocalCfg struct {
 	PostUp           []string              `yaml:"post_up,omitempty"`            // a list of commands executed in order after the nylon interface is brought up
 	PostDown         []string              `yaml:"post_down,omitempty"`          // a list of commands executed in order after the nylon interface is brought down
 	Binds            []LocalBind           `yaml:"binds,omitempty"`              // local source/interface selectors used for endpoint probing
+
+	// Exit-node feature. A node may advertise itself as an exit, use another
+	// node as its exit, both, or neither. Note: combining ExitNode with
+	// ExitNodeDefaultRoute on a node that also advertises an exit would route
+	// the decap'd transit traffic back into nylon, so avoid that pairing.
+	AdvertiseExitNode bool   `yaml:"advertise_exit_node,omitempty"` // accept exit-encap traffic and terminate it on this node
+	ExitNode          NodeId `yaml:"exit_node,omitempty"`           // route otherwise-unrouted traffic through this remote node
+	// ExitNodeDefaultRoute, when set together with ExitNode, installs a
+	// 0.0.0.0/0 route into the system table so the OS hands all
+	// otherwise-unrouted traffic to nylon (full-tunnel). When false the
+	// exit node is configured but no default route is installed, so only
+	// destinations explicitly routed onto the nylon interface are tunneled.
+	ExitNodeDefaultRoute bool `yaml:"exit_node_default_route,omitempty"`
 }
 
 func (c *CentralCfg) Clone() (error, *CentralCfg) {
