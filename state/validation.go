@@ -70,6 +70,12 @@ func NodeConfigValidator(central *CentralCfg, node *LocalCfg) error {
 			return fmt.Errorf("invalid prefix %s", p)
 		}
 	}
+	if node.ExitNode == node.Id {
+		return fmt.Errorf("node %s cannot use itself as exit_node", node.Id)
+	}
+	if central != nil && node.ExitNode != "" && !central.IsNode(node.ExitNode) {
+		return fmt.Errorf("exit_node %s is not in central config", node.ExitNode)
+	}
 	// check that node is in central config
 	if central != nil && !central.IsNode(node.Id) {
 		return fmt.Errorf("node %s is not in central config", node.Id)
@@ -112,6 +118,15 @@ func CentralConfigValidator(cfg *CentralCfg) error {
 	}
 	_, err := ParseGraph(cfg.Graph, nodes)
 	if err != nil {
+		return err
+	}
+
+	// The dataplane unicast header carries the numeric node id as a 20-bit
+	// MPLS label (ids start at FirstNodeIdNumeric to skip the reserved labels).
+	// Building the id map validates capacity, explicit-id bounds (>= 16),
+	// and uniqueness, and is deterministic; surface any error here so both
+	// `nylon verify` and runtime config apply reject a bad assignment.
+	if _, err := BuildNodeIdMap(cfg); err != nil {
 		return err
 	}
 
