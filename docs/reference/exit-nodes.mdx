@@ -1,0 +1,158 @@
+---
+title: Exit Nodes
+description: How nylon tunnels otherwise-unrouted traffic through a remote node using an MPLS-isomorphic encapsulation.
+---
+
+Nylon can route a node's otherwise-unrouted traffic out through a remote node,
+the way a VPN "exit" or "gateway" works. The feature is built on a generic
+node-to-node tunnel packet (`NyUnicast`) whose header is isomorphic to a single
+MPLS label-stack entry, so steering traffic to an exit needs no per-flow control
+protocol — just a route.
+
+## Model
+
+Exit forwarding separates three roles, each independently configured per node:
+
+- **Exit node**: a node that accepts exit traffic, terminates it, and emits the
+  inner packet onto its local stack (`advertise_exit_node: true`).
+- **Exit client**: a node that sends its unrouted traffic to a named exit
+  (`exit_node: <id>`).
+- **Transit nodes**: every node on the path in between. They forward the
+  encapsulated packet without any exit configuration.
+
+A node may be any combination of these (an exit can itself use another exit, a
+client can also advertise).
+
+Routing is unchanged. Nylon still computes routes over node ids; exit forwarding
+only decides *what to put on the wire* and *where to decapsulate*. The next hop
+for an encapsulated packet is looked up in the same forwarding table used for
+ordinary traffic.
+
+## Numeric node ids as MPLS labels
+
+Every node has a compact numeric id (`NodeIdNumeric`) derived deterministically
+from the central config (alphabetical order over routers + clients). The value
+is intentionally chosen to be a valid MPLS label:
+
+- Labels `0-15` are reserved by the kernel, so assignable ids start at `16`.
+- The id fits in the 20-bit MPLS label field, so `MaxNodeIdNumeric` is `0xFFFFF`.
+- `0` means "invalid / unassigned".
+
+Because the same central config produces the same mapping on every node, peers
+always agree on the encoding without negotiating it. A node may pin its id with
+`numeric_id` in central.yaml; un-pinned nodes are packed into the lowest free
+slots. Pinning is useful when you want a stable, memorable MPLS label for an
+exit.
+
+## Wire format
+
+`NyUnicast` is carried inside the polyamide transport layer and reserves a
+subtype byte so the same envelope can be reused for future node-targeted
+features. The current subtype, `NyUnicastSubtypeMpls`, carries one MPLS
+label-stack entry:
+
+```
++---------------------+----------+-----------------+------------------+
+| poly outer header   | subtype  | MPLS LSE        | subtype payload  |
+| (3 bytes)           | (1 byte) | (4 bytes)       |                  |
++---------------------+----------+-----------------+------------------+
+```
+
+The outer header's first byte sets the IP-version nibble to `9`, an invalid IP
+version, so the packet is unambiguously distinguished from a real IPv4/IPv6
+datagram on the same path. The MPLS label-stack entry holds:
+
+- **label** (20 bits): the destination `NodeIdNumeric`.
+- **tc** (3 bits): traffic class, passed through unchanged.
+- **s** (1 bit): bottom-of-stack.
+- **ttl** (8 bits): decremented at every transit hop; the packet is dropped at
+  zero.
+
+No source node id is carried, so there is no source-ownership check at the exit:
+whoever can encapsulate to an exit can use it. Restrict who may reach an exit
+with ordinary routing/firewalling, not with this header.
+
+## Forwarding
+
+A single label drives the whole path. When a `NyUnicast` MPLS packet is handled:
+
+- **label is not us** — transit. Decrement the TTL and forward the entire stack
+  to the next hop for that node id.
+- **label is us, bottom-of-stack set** — terminal. Strip the label stack and
+  bounce the inner IPv4/IPv6 packet onto the local stack as if it had arrived
+  normally. Requires `advertise_exit_node: true`, otherwise the packet is
+  dropped.
+- **label is us, more labels below** — pop our (outer) label and emit the
+  remaining MPLS packet out the TUN, letting the kernel's MPLS stack (e.g. an
+  `ip -M route` pop rule) take over. This requires the TUN to run in
+  packet-information (PI) mode so it can frame a non-IP (MPLS) ethertype.
+
+The same code path serves both inbound transit packets and freshly wrapped
+locally-originated packets, so there is no separate "ingress" vs "forward"
+logic.
+
+## Selecting an exit
+
+There are two ways to put traffic on the exit path. Neither needs a restart to
+change.
+
+### Static exit (config)
+
+Set `exit_node` on the client. Nylon installs a traffic-control filter that
+wraps any outbound IP packet that falls off the local routing table and sends it
+to the configured exit:
+
+```yaml title="node.yaml"
+exit_node: "public" # send otherwise-unrouted traffic out via node "public"
+exit_node_default_route: false
+```
+
+By default only destinations explicitly routed onto nylon are tunneled. Set
+`exit_node_default_route: true` to install `0.0.0.0/0` (and `::/0`) so the OS
+sends *all* unrouted traffic into nylon — a full tunnel.
+
+### Per-flow exit (MPLS route)
+
+Because a node's numeric id *is* its MPLS label, you can steer traffic to any
+exit-advertising node purely with a route, with no nylon-side configuration:
+
+```bash
+# send this destination out through the node whose numeric id is 5
+ip route add 203.0.113.0/24 dev nylon0 encap mpls 5
+```
+
+Nylon reads MPLS frames from the TUN (PI mode), re-frames them as `NyUnicast`,
+and forwards by label. Switch exits at runtime by re-pointing the route's label;
+no restart, no config push.
+
+Deciding *which* flows take which label is ordinary Linux policy routing,
+entirely external to nylon — by destination, interface, or (for example) an
+fwmark set by another tool:
+
+```bash
+ip rule add fwmark 0x1 lookup 101
+ip route add default dev nylon0 encap mpls 5 table 101
+```
+
+## Snapshot dataplane
+
+The dataplane never reads the live config or routing tables. A goroutine
+rebuilds an immutable `ExitFilterSnapshot` — local identity, exit settings, the
+numeric-id map, and a numeric-keyed next-hop table — at startup, after every
+central config apply, and after every route mutation. The filters only ever load
+the pointer, keeping the hot path lock-free and decoupled from control-plane
+mutation.
+
+## Asymmetric paths
+
+The exit path does not require the reverse route to traverse the same nodes.
+Transit and exit decisions are made purely from the destination label and the
+local forwarding table, so return traffic can take an entirely different path
+back to the client.
+
+## Platform notes
+
+The MPLS pop-to-TUN behaviour and per-flow MPLS ingress depend on the TUN
+running in packet-information mode, which is implemented for Linux. Static
+`exit_node` encapsulation and decapsulation of bottom-of-stack packets do not
+require PI mode.
