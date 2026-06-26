@@ -120,6 +120,15 @@ func Bootstrap(centralPath, nodePath, logPath string, verbose bool, opts state.N
 	if logPath != "" {
 		nodeCfg.LogPath = logPath
 	}
+	if opts.AdvertiseExitNodeSet {
+		nodeCfg.AdvertiseExitNode = opts.AdvertiseExitNode
+	}
+	if opts.ExitNodeSet {
+		nodeCfg.ExitNode = opts.ExitNode
+	}
+	if opts.ExitNodeDefaultRouteSet {
+		nodeCfg.ExitNodeDefaultRoute = opts.ExitNodeDefaultRoute
+	}
 
 	state.ExpandCentralConfig(centralCfg)
 	if err = state.CentralConfigValidator(centralCfg); err != nil {
