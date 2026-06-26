@@ -19,6 +19,13 @@ func (n *Nylon) initWireGuard() error {
 		return err
 	}
 
+	// Must be set before Up() starts the TUN reader goroutine. Always on:
+	// a bare MPLS packet routed into the TUN is re-framed as a NyUnicast/MPLS
+	// packet whose label selects the exit node. This only has an effect when
+	// the operator installs MPLS-encap routes, so it is safe to leave enabled.
+	dev.MplsUnicastProtoId = NyUnicastProtoId
+	dev.MplsUnicastSubtype = byte(NyUnicastSubtypeMpls)
+
 	err = dev.Up()
 	if err != nil {
 		return err
