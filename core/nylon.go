@@ -195,6 +195,18 @@ func (n *Nylon) Init() error {
 		ttlcache.WithTTL[uint64, EpPing](5*time.Second),
 		ttlcache.WithDisableTouchOnHit[uint64, EpPing](),
 	)
+	// A probe that expires from the buffer never got a pong back, so it
+	// counts as a lost probe. Successful pongs and send failures remove the
+	// entry via GetAndDelete/Delete (EvictionReasonDeleted) and are ignored
+	// here; a successful pong records its own outcome in handleProbePong.
+	n.PingBuf.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason, item *ttlcache.Item[uint64, EpPing]) {
+		if reason != ttlcache.EvictionReasonExpired {
+			return
+		}
+		if ep := item.Value().Endpoint; ep != nil {
+			ep.RecordProbe(false)
+		}
+	})
 	go n.PingBuf.Start()
 
 	n.RepeatTask(func() error {

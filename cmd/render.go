@@ -163,6 +163,13 @@ func formatDurationNs(ns int64) string {
 	return time.Duration(ns).String()
 }
 
+func formatLossRate(loss float32) string {
+	if loss <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f%%", loss*100)
+}
+
 func printJSON(resp *protocol.IpcResponse) {
 	m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
 	data, _ := m.Marshal(resp)

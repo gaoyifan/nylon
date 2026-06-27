@@ -24,10 +24,20 @@ type RouterTunables struct {
 	// MinimumConfidenceWindow is the minimum number of samples before we lower the ping
 	MinimumConfidenceWindow int
 
-	GcDelay            time.Duration
-	LinkDeadThreshold  time.Duration
-	RouteExpiryTime    time.Duration
-	LinkSwitchDeadband float64 // We will switch to a new feasible route if: metric(new) * LinkSwitchDeadband <= metric(old)
+	GcDelay           time.Duration
+	LinkDeadThreshold time.Duration
+	RouteExpiryTime   time.Duration
+
+	// Packet-loss metric factor (ETX-style). The per-link metric is penalized
+	// as: metric = base/(1-p) + LossRetxFloor * p/(1-p), where p is the
+	// smoothed loss rate clamped to LossCap.
+	LossSmoothingAlpha float64       // EWMA factor for per-probe loss samples
+	LossRetxFloor      time.Duration // fixed per-retransmission cost floor
+	LossCap            float64       // upper clamp on the loss rate (< 1)
+
+	// MetricSmoothingAlpha is the EWMA factor for the smoothed route metric
+	// ms(R) used by the RFC 8966 A.3 dual-metric route-selection hysteresis.
+	MetricSmoothingAlpha float64
 
 	// client configuration
 	ClientKeepaliveInterval time.Duration
@@ -89,10 +99,17 @@ func DefaultRouterTunables() RouterTunables {
 		OutlierPercentage:       0.05,
 		MinimumConfidenceWindow: int(time.Second * 15 / probeDelay),
 
-		GcDelay:            time.Millisecond * 1000,
-		LinkDeadThreshold:  5 * probeDelay,
-		RouteExpiryTime:    5 * routeUpdateDelay,
-		LinkSwitchDeadband: 1.1,
+		GcDelay:           time.Millisecond * 1000,
+		LinkDeadThreshold: 5 * probeDelay,
+		RouteExpiryTime:   5 * routeUpdateDelay,
+
+		LossSmoothingAlpha: 0.1,
+		LossRetxFloor:      time.Millisecond * 100,
+		LossCap:            0.95,
+
+		// time constant ~3x RouteUpdateDelay; with updates roughly every
+		// RouteUpdateDelay this yields a smoothing factor near 1/3.
+		MetricSmoothingAlpha: 0.33,
 
 		ClientKeepaliveInterval: 3 * probeDelay,
 		ClientDeadThreshold:     6 * probeDelay, // 2 * ClientKeepaliveInterval

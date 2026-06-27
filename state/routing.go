@@ -115,6 +115,10 @@ func (r PubRoute) LogValue() slog.Value {
 type NeighRoute struct {
 	PubRoute
 	ExpireAt time.Time // when the route expires
+	// SmoothedMetric is ms(R): an exponentially smoothed version of this
+	// candidate's total route metric, used for RFC 8966 A.3 route-selection
+	// hysteresis. Zero means "uninitialized" (no metric observed yet).
+	SmoothedMetric float64
 }
 
 type SelRoute struct {

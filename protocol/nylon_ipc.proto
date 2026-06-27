@@ -66,6 +66,7 @@ message EndpointInfo {
   int64 stabilized_rtt_ns = 8;
   string local_bind_interface = 10;
   string local_bind_source = 11;
+  float loss_rate = 12;
 }
 
 message WireGuardPeerStats {

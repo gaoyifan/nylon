@@ -226,7 +226,7 @@ func bestEndpoint(endpoints []*protocol.EndpointInfo) *protocol.EndpointInfo {
 func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, best *protocol.EndpointInfo, full bool) {
 	headers := []string{"address", "resolved", "metric", "state"}
 	if full {
-		headers = append(headers, "rtt", "stable rtt")
+		headers = append(headers, "rtt", "stable rtt", "loss")
 	}
 	rows := make([][]string, 0, len(endpoints))
 	for _, ep := range endpoints {
@@ -236,7 +236,7 @@ func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, best *p
 		}
 		row := []string{ep.Address, resolved, metricText(p, ep.Metric), endpointFlags(p, ep, best)}
 		if full {
-			row = append(row, formatDurationNs(ep.FilteredRttNs), formatDurationNs(ep.StabilizedRttNs))
+			row = append(row, formatDurationNs(ep.FilteredRttNs), formatDurationNs(ep.StabilizedRttNs), formatLossRate(ep.LossRate))
 		}
 		rows = append(rows, row)
 	}

@@ -490,7 +490,18 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 	//   holes if the metric being used is not left-distributive
 	//   (Section 3.5.2).
 
-	// enumerate through neighbours
+	// enumerate through neighbours to build candidate routes per prefix and
+	// update the smoothed metric ms(R) used for A.3 hysteresis. We track both
+	// the smallest-instantaneous-metric candidate and the candidate (if any)
+	// corresponding to the currently selected route, so route selection can be
+	// made order-independent.
+	type candidate struct {
+		route    state.SelRoute
+		smoothed float64
+	}
+	bestByPrefix := make(map[netip.Prefix]candidate)
+	selByPrefix := make(map[netip.Prefix]candidate)
+
 	for _, neigh := range s.Neighbours {
 		bestEp := neigh.BestEndpoint()
 		if bestEp == nil {
@@ -512,26 +523,10 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 			// Cost(A, B) + Cost(S, B)
 			totalCost := AddMetric(CAB, adv.Metric)
 
-			oldRoute, exists := newTable[prefix]
-
 			//   *  a route with infinite metric (a retracted route) is never
 			//      selected;
 			if totalCost == state.INF {
 				continue // ignored
-			}
-
-			fd := state.FD{
-				Seqno:  adv.Seqno,
-				Metric: totalCost,
-			}
-			newRoute := state.SelRoute{
-				PubRoute: state.PubRoute{
-					Source: adv.Source,
-					FD:     fd,
-				},
-				Nh:          neigh.Id,
-				ExpireAt:    adv.ExpireAt,
-				RetractedBy: []state.NodeId{},
 			}
 
 			//   *  an unfeasible route is never selected.
@@ -539,27 +534,77 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 				continue // ignored
 			}
 
-			// Refresh the current winner for this recomputation. This keeps a
-			// selected next hop selected even when its metric worsens.
-			if exists && oldRoute.Nh == newRoute.Nh {
-				newTable[prefix] = newRoute
-				continue
-			}
+			// Update ms(R), the smoothed metric for this (neigh, prefix)
+			// candidate (RFC 8966 A.3).
+			nr := neigh.Routes[prefix]
+			nr.SmoothedMetric = smoothMetric(nr.SmoothedMetric, totalCost, s.MetricSmoothingAlpha)
+			neigh.Routes[prefix] = nr
 
-			if !exists {
-				// create new route
-				newTable[prefix] = newRoute
-			} else {
-				// check if we should switch to this route
-				if oldRoute.Metric == newRoute.Metric {
-					if prevRoute, ok := s.Routes[prefix]; ok && sameRoute(oldRoute, prevRoute) {
-						continue
-					}
-				}
-				if ShouldSwitch(oldRoute, newRoute, s.RouterTunables) {
-					newTable[prefix] = newRoute
-				}
+			newRoute := state.SelRoute{
+				PubRoute: state.PubRoute{
+					Source: adv.Source,
+					FD: state.FD{
+						Seqno:  adv.Seqno,
+						Metric: totalCost,
+					},
+				},
+				Nh:          neigh.Id,
+				ExpireAt:    adv.ExpireAt,
+				RetractedBy: []state.NodeId{},
 			}
+			cand := candidate{route: newRoute, smoothed: nr.SmoothedMetric}
+
+			if cur, ok := bestByPrefix[prefix]; !ok || newRoute.Metric < cur.route.Metric {
+				bestByPrefix[prefix] = cand
+			}
+			if prev, ok := s.Routes[prefix]; ok && prev.Nh == neigh.Id && prev.Source == adv.Source {
+				selByPrefix[prefix] = cand
+			}
+		}
+	}
+
+	// 3.6 route selection, using the RFC 8966 A.3 dual-metric hysteresis: if no
+	// route is currently selected, pick the smallest instantaneous metric; if a
+	// route R is selected, switch to R' only when both m(R') < m(R) and
+	// ms(R') < ms(R).
+	for prefix, best := range bestByPrefix {
+		incumbent, hasIncumbent := newTable[prefix]
+		sel, hasSel := selByPrefix[prefix]
+
+		// Determine the route we currently use for this prefix (the one to
+		// apply hysteresis against) and its smoothed metric. Pre-populated
+		// entries (held INF placeholders and our own advertised routes) act as
+		// the incumbent; otherwise the previously selected route does.
+		var cur *state.SelRoute
+		var curSmoothed float64
+		if hasIncumbent {
+			inc := incumbent
+			cur = &inc
+			curSmoothed = float64(incumbent.Metric)
+			if hasSel && sameRoute(incumbent, sel.route) {
+				curSmoothed = sel.smoothed
+			}
+		} else if hasSel {
+			sr := sel.route
+			cur = &sr
+			curSmoothed = sel.smoothed
+		}
+
+		switch {
+		case cur == nil:
+			// no route currently selected: pick smallest instantaneous metric
+			newTable[prefix] = best.route
+		case sameRoute(best.route, *cur):
+			// same route still best: refresh to the latest metric. This keeps a
+			// selected next hop selected even when its metric worsens.
+			newTable[prefix] = best.route
+		case best.route.Metric < cur.Metric && best.smoothed < curSmoothed:
+			// A.3: switch only when both instantaneous and smoothed metrics improve
+			newTable[prefix] = best.route
+		default:
+			// keep the current route (refresh held/advertised incumbent or the
+			// re-derived selected route)
+			newTable[prefix] = *cur
 		}
 	}
 
@@ -671,14 +716,16 @@ func SolveStarvation(router *state.RouterState, r Router) {
 	//   requests are expected to actually reach the source.)
 }
 
-func ShouldSwitch(curRoute state.SelRoute, newRoute state.SelRoute, tunable *state.RouterTunables) bool {
-	// TODO: Investigate stable routing heuristics
-	curMetric := float64(curRoute.Metric)
-	newMetric := float64(newRoute.Metric)
-	if newMetric*tunable.LinkSwitchDeadband > curMetric {
-		return false
+// smoothMetric computes the exponentially smoothed route metric ms(R) used by
+// the RFC 8966 A.3 hysteresis. A zero prev is treated as uninitialized and is
+// seeded with the first observed sample so a brand-new candidate is not
+// unfairly blocked from initial selection.
+func smoothMetric(prev float64, sample uint32, alpha float64) float64 {
+	s := float64(sample)
+	if prev == 0 {
+		return s
 	}
-	return true
+	return alpha*s + (1-alpha)*prev
 }
 
 func IsStrictlyBetter(curRoute state.SelRoute, newRoute state.SelRoute) bool {

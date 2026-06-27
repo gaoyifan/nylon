@@ -235,6 +235,7 @@ func buildEndpoints(neigh *state.Neighbour) []*protocol.EndpointInfo {
 			Metric:             ep.Metric(),
 			FilteredRttNs:      int64(nep.FilteredPing()),
 			StabilizedRttNs:    int64(nep.StabilizedPing()),
+			LossRate:           float32(nep.LossRate()),
 			LocalBindInterface: nep.Bind.Interface,
 			LocalBindSource:    bindSource,
 		})

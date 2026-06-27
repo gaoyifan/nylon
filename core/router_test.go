@@ -1436,8 +1436,13 @@ func TestRouterNet6A_ConvergeOptimal(t *testing.T) {
 	// 2 \  /
 	//    C
 	AC.metric = 2
-	// Now, C and B are closer via C instead of B
-	ComputeRoutes(rs, h)
+	// Now, C and B are closer via C instead of B. Under the RFC 8966 A.3
+	// dual-metric hysteresis, switching to a strictly better route is gated on
+	// the smoothed metric ms(R) catching up, so convergence to the optimum
+	// takes a few recomputations rather than happening on the first one.
+	for i := 0; i < 16; i++ {
+		ComputeRoutes(rs, h)
+	}
 	a = h.GetActions()
 	// check that we converge to the correct table
 	assert.Equal(t, ``, a.String()) // not a significant change, so we should not broadcast
@@ -1461,4 +1466,54 @@ func TestRouterNet6A_ConvergeOptimal(t *testing.T) {
 10.0.0.2/32 via (nh: B, router: B, prefix: 10.0.0.2/32, seqno: 0, metric: 12000000)
 10.0.0.3/32 via (nh: C, router: C, prefix: 10.0.0.3/32, seqno: 0, metric: 10000000)
 10.0.0.4/32 via (nh: C, router: D, prefix: 10.0.0.4/32, seqno: 0, metric: 10000001)`, rs.StringRoutes())
+}
+
+// TestRouterA3Hysteresis verifies the RFC 8966 A.3 dual-metric route-selection
+// hysteresis: a transient instantaneous improvement on an alternative route
+// must not trigger a switch until its smoothed metric ms(R) also improves,
+// while a sustained improvement is eventually adopted.
+func TestRouterA3Hysteresis(t *testing.T) {
+	tunables := ConfigureConstants()
+	h := &RouterHarness{}
+	rs := &state.RouterState{
+		RouterTunables: tunables,
+		Id:             "A",
+		SelfSeqno:      make(map[netip.Prefix]uint16),
+		Routes:         make(map[netip.Prefix]state.SelRoute),
+		Sources:        make(map[state.Source]state.FD),
+		Neighbours:     MakeNeighbours("B", "C"),
+		Advertised:     map[netip.Prefix]state.Advertisement{nodeToPrefix("A"): {NodeId: state.NodeId("A"), Expiry: maxTime}},
+	}
+
+	// Two parallel paths to D: via B (cost 10) and via C (cost 20).
+	AddLink(rs, NewMockEndpoint("B", 10))
+	ac := AddLink(rs, NewMockEndpoint("C", 20))
+	h.NeighUpdate(rs, "B", "D", nodeToPrefix("D"), 0, 0)
+	h.NeighUpdate(rs, "C", "D", nodeToPrefix("D"), 0, 0)
+
+	// settle: D is selected via B and ms(C) settles around 20
+	for i := 0; i < 8; i++ {
+		ComputeRoutes(rs, h)
+	}
+	h.GetActions()
+	assert.Equal(t, state.NodeId("B"), rs.Routes[nodeToPrefix("D")].Nh)
+
+	// transient one-shot dip: via C is instantaneously better (5 < 10) but its
+	// smoothed metric has not caught up, so we must NOT switch.
+	ac.metric = 5
+	ComputeRoutes(rs, h)
+	assert.Equal(t, state.NodeId("B"), rs.Routes[nodeToPrefix("D")].Nh,
+		"must not switch on a transient dip (smoothed metric not yet improved)")
+	ac.metric = 20
+	ComputeRoutes(rs, h)
+	assert.Equal(t, state.NodeId("B"), rs.Routes[nodeToPrefix("D")].Nh)
+
+	// sustained improvement: both instantaneous and smoothed metrics improve,
+	// so the route is eventually adopted.
+	ac.metric = 5
+	for i := 0; i < 20; i++ {
+		ComputeRoutes(rs, h)
+	}
+	assert.Equal(t, state.NodeId("C"), rs.Routes[nodeToPrefix("D")].Nh,
+		"must switch once the improvement is sustained")
 }

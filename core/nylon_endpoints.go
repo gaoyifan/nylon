@@ -212,6 +212,7 @@ func handleProbePong(n *Nylon, node state.NodeId, token uint64, ep conn.Endpoint
 	}
 	dpLink.Renew()
 	dpLink.UpdatePing(latency)
+	dpLink.RecordProbe(true)
 
 	// Record the reply's current WireGuard endpoint on the endpoint that sent the probe.
 	dpLink.WgEndpoint = ep

@@ -172,6 +172,11 @@ type NylonEndpoint struct {
 	WgEndpoint    conn.Endpoint
 	DynEP         *DynamicEndpoint
 	Bind          LocalBind
+
+	// packet-loss estimation derived from probe success/expiry
+	lossEWMA    float64
+	lossInit    bool
+	lossSamples int
 }
 
 func (ep *NylonEndpoint) AsNylonEndpoint() *NylonEndpoint {
@@ -241,6 +246,10 @@ func (u *NylonEndpoint) Renew() {
 		u.history = u.history[:0]
 		u.expRTT = math.Inf(1)
 		u.dirty = true
+		// a recovered link starts with a clean loss estimate
+		u.lossEWMA = 0
+		u.lossInit = false
+		u.lossSamples = 0
 	}
 	u.lastHeardBack = time.Now()
 }
@@ -322,12 +331,66 @@ func (u *NylonEndpoint) UpdatePing(ping time.Duration) {
 	u.dirty = true
 }
 
+// RecordProbe folds the outcome of a single probe into the endpoint's loss
+// estimate. received is true when a pong came back, false when the probe
+// timed out (was lost). The estimate is an exponential moving average of the
+// per-probe loss indicator.
+func (u *NylonEndpoint) RecordProbe(received bool) {
+	u.Lock()
+	defer u.Unlock()
+	sample := 1.0
+	if received {
+		sample = 0.0
+	}
+	if !u.lossInit {
+		u.lossEWMA = sample
+		u.lossInit = true
+	} else {
+		a := u.t.LossSmoothingAlpha
+		u.lossEWMA = a*sample + (1-a)*u.lossEWMA
+	}
+	if u.lossSamples < u.t.MinimumConfidenceWindow {
+		u.lossSamples++
+	}
+}
+
+// LossRate returns the smoothed packet-loss probability in [0, LossCap]. It
+// returns 0 until enough probes have been observed, so a cold link is never
+// penalized for loss.
+func (u *NylonEndpoint) LossRate() float64 {
+	u.RLock()
+	defer u.RUnlock()
+	if u.lossSamples < u.t.MinimumConfidenceWindow {
+		return 0
+	}
+	l := u.lossEWMA
+	if l < 0 {
+		l = 0
+	}
+	if l > u.t.LossCap {
+		l = u.t.LossCap
+	}
+	return l
+}
+
 func (u *NylonEndpoint) Metric() uint32 {
 	// if link is dead, return INF
 	if !u.IsActive() {
 		return INF
 	}
-	return DurationToMetric(u.StabilizedPing())
+	base := u.StabilizedPing()
+	p := u.LossRate()
+	if p <= 0 {
+		return DurationToMetric(base)
+	}
+	// ETX-style retransmission model: the expected delivery time under
+	// geometric retransmission is base/(1-p), plus a fixed per-retransmission
+	// floor so that low-RTT-but-lossy links are still penalized:
+	//   metric = base/(1-p) + RetxFloor * p/(1-p)
+	//          = base + (base + RetxFloor) * p/(1-p)
+	factor := p / (1 - p)
+	extra := time.Duration(float64(base+u.t.LossRetxFloor) * factor)
+	return DurationToMetric(base + extra)
 }
 
 func (u *NylonEndpoint) IsRemote() bool {

@@ -215,6 +215,89 @@ func TestEndpointNormal(t *testing.T) {
 	assert.Less(t, len(distinctValues), int(time.Hour*2/time.Minute))
 }
 
+// stableEndpoint returns an active endpoint whose StabilizedPing has settled to
+// base (history filled with a constant RTT).
+func stableEndpoint(base time.Duration, tun *RouterTunables) *NylonEndpoint {
+	ep := NewEndpoint(NewDynamicEndpoint("127.0.0.1:0"), false, nil, tun)
+	ep.Renew()
+	for i := 0; i < tun.WindowSamples; i++ {
+		ep.UpdatePing(base)
+	}
+	return ep
+}
+
+func TestEndpointLossConfidenceGate(t *testing.T) {
+	tun := DefaultRouterTunables()
+	ep := stableEndpoint(50*time.Millisecond, &tun)
+	// fewer than the confidence window of loss samples: no penalty yet
+	for i := 0; i < tun.MinimumConfidenceWindow-1; i++ {
+		ep.RecordProbe(false)
+	}
+	assert.Equal(t, 0.0, ep.LossRate())
+	assert.Equal(t, DurationToMetric(ep.StabilizedPing()), ep.Metric())
+}
+
+func TestEndpointLossMetric(t *testing.T) {
+	tun := DefaultRouterTunables()
+	base := 50 * time.Millisecond
+	clean := stableEndpoint(base, &tun)
+	lossy := stableEndpoint(base, &tun)
+	for i := 0; i < tun.MinimumConfidenceWindow; i++ {
+		clean.RecordProbe(true)
+		lossy.RecordProbe(false)
+	}
+
+	// a link with no loss is unchanged; a fully-lossy link saturates at LossCap
+	assert.Equal(t, 0.0, clean.LossRate())
+	assert.InDelta(t, tun.LossCap, lossy.LossRate(), 1e-9)
+	assert.Equal(t, DurationToMetric(clean.StabilizedPing()), clean.Metric())
+	assert.Greater(t, lossy.Metric(), clean.Metric())
+
+	// the lossy metric matches the ETX-style formula exactly
+	p := lossy.LossRate()
+	bs := lossy.StabilizedPing()
+	factor := p / (1 - p)
+	expected := DurationToMetric(bs + time.Duration(float64(bs+tun.LossRetxFloor)*factor))
+	assert.Equal(t, expected, lossy.Metric())
+}
+
+func TestEndpointLossConverges(t *testing.T) {
+	tun := DefaultRouterTunables()
+	ep := stableEndpoint(50*time.Millisecond, &tun)
+	// a deterministic 1-in-4 loss pattern; the EWMA should converge near 0.25
+	for i := 0; i < 400; i++ {
+		ep.RecordProbe(i%4 != 0)
+	}
+	assert.InDelta(t, 0.25, ep.LossRate(), 0.05)
+}
+
+func TestEndpointLossMonotonic(t *testing.T) {
+	tun := DefaultRouterTunables()
+	base := 50 * time.Millisecond
+	low := stableEndpoint(base, &tun)
+	high := stableEndpoint(base, &tun)
+	for i := 0; i < 400; i++ {
+		low.RecordProbe(i%4 != 0)  // ~25% loss
+		high.RecordProbe(i%2 != 0) // ~50% loss
+	}
+	assert.Greater(t, low.LossRate(), 0.0)
+	assert.Greater(t, high.LossRate(), low.LossRate())
+	assert.Greater(t, high.Metric(), low.Metric())
+}
+
+// A low-RTT but lossy link must lose to a clean higher-RTT link, which is the
+// "long lossy link" problem ETX is designed to prevent.
+func TestEndpointLossyLowRttLosesToCleanHighRtt(t *testing.T) {
+	tun := DefaultRouterTunables()
+	lossyFast := stableEndpoint(5*time.Millisecond, &tun)
+	cleanSlow := stableEndpoint(80*time.Millisecond, &tun)
+	for i := 0; i < tun.MinimumConfidenceWindow; i++ {
+		lossyFast.RecordProbe(i%2 != 0) // ~50% loss
+		cleanSlow.RecordProbe(true)
+	}
+	assert.Greater(t, lossyFast.Metric(), cleanSlow.Metric())
+}
+
 func TestDynamicEndpoint_Parse(t *testing.T) {
 	tests := []struct {
 		name         string
