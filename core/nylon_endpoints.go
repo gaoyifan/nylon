@@ -220,11 +220,30 @@ func handleProbePong(n *Nylon, node state.NodeId, token uint64, ep conn.Endpoint
 	ComputeRoutes(n.RouterState, n)
 }
 
+// endpointFamilyUnreachable reports whether probing ep is pointless because
+// the host has no route for the endpoint's address family (e.g. IPv6
+// endpoints on an IPv4-only host). Endpoints with an explicit bind source are
+// never skipped, since source-based policy routing may provide connectivity
+// that a plain route lookup does not see.
+func endpointFamilyUnreachable(ep *state.NylonEndpoint) bool {
+	if ep.Bind.Source.IsValid() {
+		return false
+	}
+	ap, err := ep.DynEP.Get()
+	if err != nil {
+		return false
+	}
+	return !familyReachable(ap.Addr())
+}
+
 func (n *Nylon) probeLinks(active bool) error {
 	// probe links
 	for _, neigh := range n.RouterState.Neighbours {
 		for _, ep := range neigh.Eps {
 			if ep.IsActive() == active {
+				if endpointFamilyUnreachable(ep.AsNylonEndpoint()) {
+					continue
+				}
 				err := n.Probe(neigh.Id, ep.AsNylonEndpoint())
 				if err != nil {
 					n.Log.Debug("probe failed", "err", err.Error())
@@ -250,6 +269,9 @@ func (n *Nylon) probeNew() error {
 		for _, ep := range cfg.Endpoints {
 			ap, err := ep.Get()
 			if err != nil {
+				continue
+			}
+			if !familyReachable(ap.Addr()) {
 				continue
 			}
 			idx := slices.IndexFunc(neigh.Eps, func(link state.Endpoint) bool {

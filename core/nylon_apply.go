@@ -113,6 +113,9 @@ func configuredEndpoints(binds []state.LocalBind, endpoints []*state.DynamicEndp
 	if len(binds) == 0 {
 		eps := make([]state.Endpoint, 0, len(endpoints))
 		for _, ep := range endpoints {
+			if !endpointFamilyRoutable(ep) {
+				continue
+			}
 			eps = append(eps, state.NewEndpoint(ep, false, nil, t))
 		}
 		return eps
@@ -124,12 +127,36 @@ func configuredEndpoints(binds []state.LocalBind, endpoints []*state.DynamicEndp
 			if !bindMatchesEndpoint(bind, ep) {
 				continue
 			}
+			// binds without an explicit source rely on the host routing
+			// table, so a family without any route is unusable for them too
+			if !bind.Source.IsValid() && !endpointFamilyRoutable(ep) {
+				continue
+			}
 			nep := state.NewEndpoint(ep, false, nil, t)
 			nep.Bind = bind
 			eps = append(eps, nep)
 		}
 	}
 	return eps
+}
+
+// familyReachable is a package variable so tests can stub out the host route
+// lookup.
+var familyReachable = state.FamilyReachable
+
+// endpointFamilyRoutable reports whether the host has a route towards the
+// endpoint's address family. Endpoints that are domain names (family unknown
+// until resolution) are kept; probeNew re-checks after resolution.
+func endpointFamilyRoutable(ep *state.DynamicEndpoint) bool {
+	host, _, err := ep.Parse()
+	if err != nil {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return true
+	}
+	return familyReachable(addr)
 }
 
 func bindMatchesEndpoint(bind state.LocalBind, ep *state.DynamicEndpoint) bool {

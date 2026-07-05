@@ -135,7 +135,18 @@ func testCentralConfig(id state.NodeId, prefixes ...state.PrefixHealthWrapper) s
 	}
 }
 
+// stubFamilyReachable overrides the host route lookup for the duration of a
+// test, so results do not depend on the test machine's connectivity.
+func stubFamilyReachable(t *testing.T, fn func(addr netip.Addr) bool) {
+	orig := familyReachable
+	familyReachable = fn
+	t.Cleanup(func() { familyReachable = orig })
+}
+
+func allFamiliesReachable(netip.Addr) bool { return true }
+
 func TestConfiguredEndpointsExpandsBindsAcrossMatchingEndpointFamilies(t *testing.T) {
+	stubFamilyReachable(t, allFamiliesReachable)
 	tunables := state.DefaultRouterTunables()
 	eps := configuredEndpoints([]state.LocalBind{
 		{Source: netip.MustParseAddr("192.0.2.10")},
@@ -153,6 +164,7 @@ func TestConfiguredEndpointsExpandsBindsAcrossMatchingEndpointFamilies(t *testin
 }
 
 func TestConfiguredEndpointsUsesDefaultEndpointWhenNoBindsConfigured(t *testing.T) {
+	stubFamilyReachable(t, allFamiliesReachable)
 	tunables := state.DefaultRouterTunables()
 	eps := configuredEndpoints(nil, []*state.DynamicEndpoint{
 		state.NewDynamicEndpoint("198.51.100.10:57175"),
@@ -162,4 +174,52 @@ func TestConfiguredEndpointsUsesDefaultEndpointWhenNoBindsConfigured(t *testing.
 	assert.Len(t, eps, 2)
 	assert.False(t, eps[0].AsNylonEndpoint().Bind.Source.IsValid())
 	assert.False(t, eps[1].AsNylonEndpoint().Bind.Source.IsValid())
+}
+
+func TestConfiguredEndpointsSkipsFamiliesWithoutRoute(t *testing.T) {
+	stubFamilyReachable(t, func(addr netip.Addr) bool { return addr.Is4() })
+	tunables := state.DefaultRouterTunables()
+
+	// no binds: IPv6 endpoints are dropped on a v4-only host
+	eps := configuredEndpoints(nil, []*state.DynamicEndpoint{
+		state.NewDynamicEndpoint("198.51.100.10:57175"),
+		state.NewDynamicEndpoint("[2001:db8::20]:57175"),
+	}, &tunables)
+	assert.Len(t, eps, 1)
+	assert.Equal(t, "198.51.100.10:57175", eps[0].AsNylonEndpoint().DynEP.Value)
+
+	// interface-only bind (no source): same filtering applies
+	eps = configuredEndpoints([]state.LocalBind{
+		{Interface: "eth0"},
+	}, []*state.DynamicEndpoint{
+		state.NewDynamicEndpoint("198.51.100.10:57175"),
+		state.NewDynamicEndpoint("[2001:db8::20]:57175"),
+	}, &tunables)
+	assert.Len(t, eps, 1)
+	assert.Equal(t, "198.51.100.10:57175", eps[0].AsNylonEndpoint().DynEP.Value)
+
+	// explicit bind source: kept even when the plain route lookup fails,
+	// since source-based policy routing may provide connectivity
+	eps = configuredEndpoints([]state.LocalBind{
+		{Source: netip.MustParseAddr("2001:db8::10")},
+	}, []*state.DynamicEndpoint{
+		state.NewDynamicEndpoint("[2001:db8::20]:57175"),
+	}, &tunables)
+	assert.Len(t, eps, 1)
+}
+
+func TestEndpointFamilyUnreachable(t *testing.T) {
+	stubFamilyReachable(t, func(addr netip.Addr) bool { return addr.Is4() })
+	tunables := state.DefaultRouterTunables()
+
+	v6 := state.NewEndpoint(state.NewDynamicEndpoint("[2001:db8::20]:57175"), false, nil, &tunables)
+	assert.True(t, endpointFamilyUnreachable(v6))
+
+	v4 := state.NewEndpoint(state.NewDynamicEndpoint("198.51.100.10:57175"), false, nil, &tunables)
+	assert.False(t, endpointFamilyUnreachable(v4))
+
+	// explicit bind source disables the check
+	v6Bound := state.NewEndpoint(state.NewDynamicEndpoint("[2001:db8::20]:57175"), false, nil, &tunables)
+	v6Bound.Bind = state.LocalBind{Source: netip.MustParseAddr("2001:db8::10")}
+	assert.False(t, endpointFamilyUnreachable(v6Bound))
 }
