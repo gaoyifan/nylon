@@ -336,7 +336,7 @@ func HandleNeighbourUpdate(s *state.RouterState, r Router, neighId state.NodeId,
 			}
 			bestEp := n.BestEndpoint()
 			if bestEp != nil {
-				dummy.Metric = AddMetric(dummy.Metric, AddMetric(bestEp.Metric(), s.HopCost))
+				dummy.Metric = AddMetric(dummy.Metric, AddMetric(bestEp.Metric(), AddMetric(s.HopCost, s.TransitCost)))
 			} else {
 				dummy.Metric = state.INF
 			}
@@ -516,6 +516,12 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 		if bestEp != nil {
 			CAB = bestEp.Metric()
 			CAB = AddMetric(CAB, s.HopCost) // to prevent 0 cost metric
+			// TransitCost penalizes every route learned from a neighbour. It
+			// applies uniformly to all candidates, so our own route selection
+			// order is unchanged, but the metric we re-advertise grows by the
+			// same amount, steering other nodes away from transiting us.
+			// Prefixes we originate (s.Advertised) are not affected.
+			CAB = AddMetric(CAB, s.TransitCost)
 		}
 
 		// enumerate through neighbour advertisements

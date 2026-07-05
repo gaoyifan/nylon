@@ -70,6 +70,9 @@ func NodeConfigValidator(central *CentralCfg, node *LocalCfg) error {
 			return fmt.Errorf("invalid prefix %s", p)
 		}
 	}
+	if node.TransitCost < 0 {
+		return fmt.Errorf("transit_cost must not be negative")
+	}
 	if node.ExitNode == node.Id {
 		return fmt.Errorf("node %s cannot use itself as exit_node", node.Id)
 	}

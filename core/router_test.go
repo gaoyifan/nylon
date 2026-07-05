@@ -1517,3 +1517,45 @@ func TestRouterA3Hysteresis(t *testing.T) {
 	assert.Equal(t, state.NodeId("C"), rs.Routes[nodeToPrefix("D")].Nh,
 		"must switch once the improvement is sustained")
 }
+
+// TestRouterTransitCost verifies that TransitCost penalizes routes learned
+// from neighbours (making the node unattractive as a transit hop) without
+// affecting the node's own advertised prefixes, and without changing the
+// relative order of the node's own route selection.
+func TestRouterTransitCost(t *testing.T) {
+	tunables := ConfigureConstants()
+	tunables.TransitCost = 100
+
+	h := &RouterHarness{}
+	aPrefix := nodeToPrefix("A")
+	sPrefix := nodeToPrefix("S")
+	rs := &state.RouterState{
+		RouterTunables: tunables,
+		Id:             "A",
+		SelfSeqno:      make(map[netip.Prefix]uint16),
+		Routes:         make(map[netip.Prefix]state.SelRoute),
+		Sources:        make(map[state.Source]state.FD),
+		Neighbours:     MakeNeighbours("B", "C"),
+		Advertised:     map[netip.Prefix]state.Advertisement{aPrefix: {NodeId: state.NodeId("A"), Expiry: maxTime}},
+	}
+
+	_ = AddLink(rs, NewMockEndpoint("B", 1))
+	_ = AddLink(rs, NewMockEndpoint("C", 5))
+
+	// both B and C advertise S; B is the cheaper path
+	h.NeighUpdate(rs, "B", "S", sPrefix, 0, 1)
+	h.NeighUpdate(rs, "C", "S", sPrefix, 0, 1)
+	ComputeRoutes(rs, h)
+
+	// selection order is unchanged (penalty is uniform across neighbours),
+	// but the selected/re-advertised metric includes the transit penalty
+	assert.Equal(t, state.NodeId("B"), rs.Routes[sPrefix].Nh)
+	assert.Equal(t, uint32(1+1+100), rs.Routes[sPrefix].Metric)
+
+	// our own prefix is advertised without any penalty
+	assert.Equal(t, uint32(0), rs.Routes[aPrefix].Metric)
+
+	a := h.GetActions()
+	a.AssertContains(t, BroadcastUpdateRoute(MakePubRoute("S", sPrefix, 0, 102)))
+	a.AssertContains(t, BroadcastUpdateRoute(MakePubRoute("A", aPrefix, 0, 0)))
+}

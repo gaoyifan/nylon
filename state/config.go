@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/goccy/go-yaml"
 	"go4.org/netipx"
@@ -72,6 +73,14 @@ type LocalCfg struct {
 	PostUp           []string              `yaml:"post_up,omitempty"`            // a list of commands executed in order after the nylon interface is brought up
 	PostDown         []string              `yaml:"post_down,omitempty"`          // a list of commands executed in order after the nylon interface is brought down
 	Binds            []LocalBind           `yaml:"binds,omitempty"`              // local source/interface selectors used for endpoint probing
+
+	// TransitCost makes this node less attractive as a forwarding (transit)
+	// node by adding the given cost to every route learned from neighbours.
+	// The node's own advertised prefixes are unaffected, so it stays fully
+	// reachable as a leaf. Expressed as a latency-equivalent duration (the
+	// metric unit), e.g. "250ms"; other nodes will only route through this
+	// node if the alternative paths are worse by more than this amount.
+	TransitCost time.Duration `yaml:"transit_cost,omitempty"`
 
 	// Exit-node feature. A node may advertise itself as an exit, use another
 	// node as its exit, both, or neither. Note: combining ExitNode with

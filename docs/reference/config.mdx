@@ -29,6 +29,15 @@ exit_node: "" # route otherwise-unrouted traffic through this remote node id
 exit_node_default_route: false # with exit_node: install 0.0.0.0/0 (full tunnel);
                                # if false, only destinations routed onto nylon are tunneled
 
+# Discourage other nodes from forwarding traffic through this node (e.g. on a
+# low-bandwidth link). The cost is added to every route this node learns from
+# its neighbours, so paths transiting this node look more expensive to the rest
+# of the mesh, while the node's own prefixes stay reachable at the normal
+# metric (it remains a first-class leaf). The value is a latency-equivalent
+# duration: with 250ms, other nodes only transit this node when all alternative
+# paths are more than 250ms worse.
+transit_cost: 0s # default: 0s (no penalty)
+
 # Local endpoint selectors. Nylon probes each peer endpoint through matching
 # binds and uses the best active link for the routing edge.
 binds:

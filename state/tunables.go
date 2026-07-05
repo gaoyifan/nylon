@@ -6,6 +6,7 @@ import "time"
 // These are set once at startup and should not be mutated after the Nylon instance starts.
 type RouterTunables struct {
 	HopCost               uint32 // add a 5 microsecond hop cost to prevent loops on ultra-fast networks.
+	TransitCost           uint32 // extra cost (microseconds) added to routes learned from neighbours, penalizing transit through this node; own prefixes are unaffected (transit_cost in node.yaml)
 	LargeChangeThreshold  uint32 // 100 milliseconds change
 	SeqnoRequestHopCount  uint8
 	RouteUpdateDelay      time.Duration
