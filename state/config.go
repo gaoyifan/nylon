@@ -65,6 +65,7 @@ type LocalCfg struct {
 	NoNetConfigure   bool                  `yaml:"no_net_configure,omitempty"`   // do not configure system networking at all
 	DnsResolvers     []string              `yaml:"dns_resolvers,omitempty"`      // dns resolvers used by nylon, currently only for config repo
 	InterfaceName    string                `yaml:"interface_name,omitempty"`     // the name of the nylon interface
+	Mtu              int                   `yaml:"mtu,omitempty"`                // MTU of the nylon interface; 0 means the built-in default (1420)
 	LogPath          string                `yaml:"log_path,omitempty"`           // if not empty, nylon will write to this file
 	UnexcludeIPs     []netip.Prefix        `yaml:"unexclude_ips,omitempty"`      // split tunnel, subtracts from centrally excluded ip ranges
 	ExcludeIPs       []netip.Prefix        `yaml:"exclude_ips,omitempty"`        // split tunnel, adds to the centrally excluded ip ranges

@@ -7,6 +7,7 @@ use_system_routing: false # Default: false - all packets from peers will come ou
 no_net_configure: false # Default: false - do not configure system networking at all
 log_path: "" # Default: "" - If set, Nylon will log to this file
 interface_name: "" # Default: "" - If set, Nylon will use this interface name instead of the default "nylon" or utunx on macOS
+mtu: 0 # Default: 0 (= 1420) - MTU of the nylon interface. Keep it consistent across the mesh; remember multi-hop paths pay the MPLS label overhead on top
 dns_resolvers: [] # Default: [] - If set (e.g ["1.1.1.1:53"]), nylon will use these DNS resolvers for its own queries
 dist: # Optional: If set, Nylon will bootstrap central.yaml from this URL if it does not exist already
   url: https://static.example.com/network1.nybundle

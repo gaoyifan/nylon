@@ -20,6 +20,7 @@ use_system_routing: false # if true, all peer packets exit via the TUN interface
 no_net_configure: false # if true, nylon won't touch system routes or interfaces
 log_path: "" # write logs to this file (empty = stderr only)
 interface_name: "" # override the interface name (default: "nylon", or utunX on macOS)
+mtu: 0 # interface MTU; 0 = built-in default (1420). Keep it consistent mesh-wide
 dns_resolvers: [] # DNS servers for nylon's own lookups, e.g. ["1.1.1.1:53"]
 
 # Exit nodes (a node may be an exit, a client of an exit, both, or neither).
