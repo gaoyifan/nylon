@@ -207,8 +207,37 @@ func endpointFlags(p paletteValues, ep *protocol.EndpointInfo) string {
 	return "[" + strings.Join(flags, ",") + "]"
 }
 
+// endpointBind renders the local bind (source address and/or interface) a
+// link probes from, using the IPv6 zone syntax for the combined form:
+// "192.0.2.10", "eth0", or "192.0.2.10%eth0". Empty when the node has no
+// binds configured for this link.
+func endpointBind(ep *protocol.EndpointInfo) string {
+	src, itf := ep.LocalBindSource, ep.LocalBindInterface
+	switch {
+	case src != "" && itf != "":
+		return src + "%" + itf
+	case src != "":
+		return src
+	default:
+		return itf
+	}
+}
+
 func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, full bool) {
-	headers := []string{"address", "resolved", "metric", "state"}
+	// links from different local binds can share the same address and
+	// resolved columns; only show the bind column when it disambiguates
+	showBind := false
+	for _, ep := range endpoints {
+		if endpointBind(ep) != "" {
+			showBind = true
+			break
+		}
+	}
+	headers := []string{"address", "resolved"}
+	if showBind {
+		headers = append(headers, "bind")
+	}
+	headers = append(headers, "metric", "state")
 	if full {
 		headers = append(headers, "rtt", "stable rtt", "out delay", "in delay", "loss")
 	}
@@ -218,7 +247,15 @@ func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, full bo
 		if ep.Resolved != nil {
 			resolved = *ep.Resolved
 		}
-		row := []string{ep.Address, resolved, metricText(p, ep.Metric), endpointFlags(p, ep)}
+		row := []string{ep.Address, resolved}
+		if showBind {
+			bind := endpointBind(ep)
+			if bind == "" {
+				bind = p.muted("-")
+			}
+			row = append(row, bind)
+		}
+		row = append(row, metricText(p, ep.Metric), endpointFlags(p, ep))
 		if full {
 			row = append(row,
 				formatDurationNs(ep.FilteredRttNs), formatDurationNs(ep.StabilizedRttNs),
