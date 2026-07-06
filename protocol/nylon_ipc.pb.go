@@ -652,8 +652,18 @@ type EndpointInfo struct {
 	LocalBindInterface string                 `protobuf:"bytes,10,opt,name=local_bind_interface,json=localBindInterface,proto3" json:"local_bind_interface,omitempty"`
 	LocalBindSource    string                 `protobuf:"bytes,11,opt,name=local_bind_source,json=localBindSource,proto3" json:"local_bind_source,omitempty"`
 	LossRate           float32                `protobuf:"fixed32,12,opt,name=loss_rate,json=lossRate,proto3" json:"loss_rate,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Excess one-way delay of this link relative to the neighbour's best link
+	// in each direction (absolute one-way delays are unknowable without
+	// synchronized clocks, but differences between links of the same
+	// neighbour are exact). The preferred link in a direction shows 0; -1
+	// when the link has not collected enough samples.
+	OutExcessNs int64 `protobuf:"varint,13,opt,name=out_excess_ns,json=outExcessNs,proto3" json:"out_excess_ns,omitempty"`
+	InExcessNs  int64 `protobuf:"varint,14,opt,name=in_excess_ns,json=inExcessNs,proto3" json:"in_excess_ns,omitempty"`
+	// selected is true for the link this node currently sends on (the active
+	// link with the lowest outbound delay + loss score).
+	Selected      bool `protobuf:"varint,15,opt,name=selected,proto3" json:"selected,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EndpointInfo) Reset() {
@@ -756,6 +766,27 @@ func (x *EndpointInfo) GetLossRate() float32 {
 	return 0
 }
 
+func (x *EndpointInfo) GetOutExcessNs() int64 {
+	if x != nil {
+		return x.OutExcessNs
+	}
+	return 0
+}
+
+func (x *EndpointInfo) GetInExcessNs() int64 {
+	if x != nil {
+		return x.InExcessNs
+	}
+	return 0
+}
+
+func (x *EndpointInfo) GetSelected() bool {
+	if x != nil {
+		return x.Selected
+	}
+	return false
+}
+
 type WireGuardPeerStats struct {
 	state                       protoimpl.MessageState `protogen:"open.v1"`
 	LatestHandshakeUnix         int64                  `protobuf:"varint,1,opt,name=latest_handshake_unix,json=latestHandshakeUnix,proto3" json:"latest_handshake_unix,omitempty"`
@@ -841,6 +872,11 @@ type NeighbourInfo struct {
 	Routes        []*NeighRoute          `protobuf:"bytes,5,rep,name=routes,proto3" json:"routes,omitempty"`
 	Advertised    []*Advertisement       `protobuf:"bytes,6,rep,name=advertised,proto3" json:"advertised,omitempty"`
 	Wireguard     *WireGuardPeerStats    `protobuf:"bytes,7,opt,name=wireguard,proto3" json:"wireguard,omitempty"`
+	// link_cost is the single-hop cost towards this neighbour advertised to
+	// the routing layer: the effective cycle latency (best outbound + best
+	// inbound link, chosen independently per direction) penalized by the
+	// coupled loss of the two selected links. Expressed in microseconds.
+	LinkCost      uint32 `protobuf:"varint,8,opt,name=link_cost,json=linkCost,proto3" json:"link_cost,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -922,6 +958,13 @@ func (x *NeighbourInfo) GetWireguard() *WireGuardPeerStats {
 		return x.Wireguard
 	}
 	return nil
+}
+
+func (x *NeighbourInfo) GetLinkCost() uint32 {
+	if x != nil {
+		return x.LinkCost
+	}
+	return 0
 }
 
 type RouteTableEntry struct {
@@ -1896,7 +1939,7 @@ const file_protocol_nylon_ipc_proto_rawDesc = "" +
 	"\x06metric\x18\x03 \x01(\rR\x06metric\x12\x1f\n" +
 	"\vexpiry_unix\x18\x04 \x01(\x03R\n" +
 	"expiryUnix\x12!\n" +
-	"\fpassive_hold\x18\x05 \x01(\bR\vpassiveHold\"\xf6\x02\n" +
+	"\fpassive_hold\x18\x05 \x01(\bR\vpassiveHold\"\xd8\x03\n" +
 	"\fEndpointInfo\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x1f\n" +
 	"\bresolved\x18\x02 \x01(\tH\x00R\bresolved\x88\x01\x01\x12\x16\n" +
@@ -1909,7 +1952,11 @@ const file_protocol_nylon_ipc_proto_rawDesc = "" +
 	"\x14local_bind_interface\x18\n" +
 	" \x01(\tR\x12localBindInterface\x12*\n" +
 	"\x11local_bind_source\x18\v \x01(\tR\x0flocalBindSource\x12\x1b\n" +
-	"\tloss_rate\x18\f \x01(\x02R\blossRateB\v\n" +
+	"\tloss_rate\x18\f \x01(\x02R\blossRate\x12\"\n" +
+	"\rout_excess_ns\x18\r \x01(\x03R\voutExcessNs\x12 \n" +
+	"\fin_excess_ns\x18\x0e \x01(\x03R\n" +
+	"inExcessNs\x12\x1a\n" +
+	"\bselected\x18\x0f \x01(\bR\bselectedB\v\n" +
 	"\t_resolved\"\xf0\x01\n" +
 	"\x12WireGuardPeerStats\x122\n" +
 	"\x15latest_handshake_unix\x18\x01 \x01(\x03R\x13latestHandshakeUnix\x12\x19\n" +
@@ -1917,7 +1964,7 @@ const file_protocol_nylon_ipc_proto_rawDesc = "" +
 	"\brx_bytes\x18\x03 \x01(\x04R\arxBytes\x12B\n" +
 	"\x1dpersistent_keepalive_interval\x18\x04 \x01(\rR\x1bpersistentKeepaliveInterval\x12\x1f\n" +
 	"\bendpoint\x18\x05 \x01(\tH\x00R\bendpoint\x88\x01\x01B\v\n" +
-	"\t_endpoint\"\xbb\x02\n" +
+	"\t_endpoint\"\xd8\x02\n" +
 	"\rNeighbourInfo\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x1d\n" +
 	"\n" +
@@ -1928,7 +1975,8 @@ const file_protocol_nylon_ipc_proto_rawDesc = "" +
 	"\n" +
 	"advertised\x18\x06 \x03(\v2\x14.proto.AdvertisementR\n" +
 	"advertised\x127\n" +
-	"\twireguard\x18\a \x01(\v2\x19.proto.WireGuardPeerStatsR\twireguard\"W\n" +
+	"\twireguard\x18\a \x01(\v2\x19.proto.WireGuardPeerStatsR\twireguard\x12\x1b\n" +
+	"\tlink_cost\x18\b \x01(\rR\blinkCost\"W\n" +
 	"\x0fRouteTableEntry\x12\x16\n" +
 	"\x06prefix\x18\x01 \x01(\tR\x06prefix\x12\x0e\n" +
 	"\x02nh\x18\x02 \x01(\tR\x02nh\x12\x1c\n" +

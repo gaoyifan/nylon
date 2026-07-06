@@ -114,6 +114,12 @@ type VirtualHarness struct {
 	UntrackedRouting bool
 	LogLevel         *slog.Level
 	Tunables         *state.RouterTunables
+	// EpOut optionally overrides the source-address mapping for outgoing
+	// packets. The default picks an arbitrary endpoint of the sending node,
+	// which is ambiguous when a node has several endpoints (parallel links);
+	// tests that model distinct physical paths should map the destination to
+	// the local endpoint of the same link.
+	EpOut OutMapping
 }
 
 func (v *VirtualHarness) IndexOf(id state.NodeId) int {
@@ -174,14 +180,18 @@ func (v *VirtualHarness) Start() chan error {
 	vn.virtTun = make([]*tuntest.ChannelTUN, nodes)
 	vn.binds = make([]conn.Bind, nodes)
 	vn.readyCond = sync.NewCond(&sync.Mutex{})
-	// pick the first endpoint specified for each node
-	vn.EpOutMapping = func(curNode state.NodeId, to bindtest.ChannelEndpoint2) bindtest.ChannelEndpoint2 {
-		for k, x := range v.Endpoints {
-			if x == curNode {
-				return bindtest.ChannelEndpoint2(netip.MustParseAddrPort(k))
+	if v.EpOut != nil {
+		vn.EpOutMapping = v.EpOut
+	} else {
+		// pick the first endpoint specified for each node
+		vn.EpOutMapping = func(curNode state.NodeId, to bindtest.ChannelEndpoint2) bindtest.ChannelEndpoint2 {
+			for k, x := range v.Endpoints {
+				if x == curNode {
+					return bindtest.ChannelEndpoint2(netip.MustParseAddrPort(k))
+				}
 			}
+			panic(fmt.Sprintf("no endpoint found for node %v", curNode))
 		}
-		panic(fmt.Sprintf("no endpoint found for node %v", curNode))
 	}
 	for e, n := range v.Endpoints {
 		idx := v.IndexOf(n)

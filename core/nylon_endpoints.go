@@ -3,8 +3,8 @@ package core
 import (
 	"cmp"
 	"fmt"
-	"math/rand/v2"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/encodeous/nylon/polyamide/conn"
@@ -13,6 +13,41 @@ import (
 	"github.com/encodeous/nylon/state"
 	"github.com/jellydator/ttlcache/v3"
 )
+
+// probeEpoch anchors the fallback probe timebase (see probe_clock_*.go for
+// the primary probeNowNs implementations). The epoch is arbitrary: probes
+// only ever compare timestamps from the same process, or combine timestamps
+// from two processes in ways where the unknown offset cancels (see
+// protocol.Ny_Probe).
+var probeEpoch = time.Now()
+
+func probeNowNsFallback() int64 {
+	return int64(time.Since(probeEpoch))
+}
+
+// probeTimestampAllocator assigns strictly increasing transmit timestamps.
+// Clock precision is not guaranteed to distinguish probes sent in rapid
+// succession, but OriginTxTs is also used to associate replies with IPC
+// probe futures, so duplicates would overwrite that association.
+type probeTimestampAllocator struct {
+	last atomic.Int64
+}
+
+func (a *probeTimestampAllocator) next(now int64) int64 {
+	for {
+		last := a.last.Load()
+		next := max(now, last+1)
+		if a.last.CompareAndSwap(last, next) {
+			return next
+		}
+	}
+}
+
+var outgoingProbeTimestamps probeTimestampAllocator
+
+func nextProbeTxNs() int64 {
+	return outgoingProbeTimestamps.next(probeNowNs())
+}
 
 type EpPing struct {
 	TimeSent time.Time
@@ -43,6 +78,9 @@ func (n *Nylon) Probe(node state.NodeId, ep *state.NylonEndpoint) error {
 	return err
 }
 
+// sendEndpointProbe sends a timestamped probe and returns a Future for the
+// IPC-facing result. The echoed OriginTxTs identifies the Future while
+// ReplyLinkId identifies the exact link for directional delay accounting.
 func (n *Nylon) sendEndpointProbe(node state.NodeId, ep *state.NylonEndpoint, timeout time.Duration) (Future[*protocol.EndpointProbeResult], error) {
 	address := ep.DynEP.Value
 	resolved := ""
@@ -72,25 +110,30 @@ func (n *Nylon) sendEndpointProbe(node state.NodeId, ep *state.NylonEndpoint, ti
 		return fail(protocol.EndpointProbeStatus_ENDPOINT_PROBE_RESOLVE_ERROR, err)
 	}
 	resolved = nep.DstIPPort().String()
-	token := rand.Uint64()
-	sentAt := time.Now()
-	ping := &protocol.Ny{
-		Type: &protocol.Ny_ProbeOp{
-			ProbeOp: &protocol.Ny_Probe{
-				Token:         token,
-				ResponseToken: nil,
-			},
-		},
+
+	txTs := nextProbeTxNs()
+	probe := &protocol.Ny_Probe{TxTs: txTs, LinkId: ep.LinkId}
+	if originTx, originRx, ok := ep.EchoInfo(txTs); ok {
+		probe.OriginTxTs = &originTx
+		probe.OriginRxTs = &originRx
 	}
+	ping := &protocol.Ny{Type: &protocol.Ny_ProbeOp{ProbeOp: probe}}
+
+	// Register before sending so that an echo can never race registration, and
+	// expire probes that have exceeded the directional-loss timeout.
+	ep.RegisterProbe(txTs)
+	ep.SweepProbes(txTs)
+
+	probeKey := uint64(txTs)
+	sentAt := time.Now()
 	var timeoutTimer *time.Timer
 	if timeout > 0 {
 		timeoutTimer = time.AfterFunc(timeout, func() {
-			n.PingBuf.Delete(token)
+			n.PingBuf.Delete(probeKey)
 			completeEndpoint(protocol.EndpointProbeStatus_ENDPOINT_PROBE_TIMEOUT, 0, nil)
 		})
 	}
-
-	n.PingBuf.Set(token, EpPing{
+	n.PingBuf.Set(probeKey, EpPing{
 		TimeSent: sentAt,
 		Peer:     node,
 		Endpoint: ep,
@@ -103,12 +146,13 @@ func (n *Nylon) sendEndpointProbe(node state.NodeId, ep *state.NylonEndpoint, ti
 	}, ttlcache.DefaultTTL)
 
 	go func() {
-		err := n.SendNylon(ping, nep, peer)
-		if err != nil {
+		if err := n.SendNylon(ping, nep, peer); err != nil {
+			// A local send failure is not packet loss.
+			ep.CancelProbe(txTs)
 			if timeoutTimer != nil {
 				timeoutTimer.Stop()
 			}
-			n.PingBuf.Delete(token)
+			n.PingBuf.Delete(probeKey)
 			completeEndpoint(protocol.EndpointProbeStatus_ENDPOINT_PROBE_SEND_ERROR, 0, err)
 		}
 	}()
@@ -117,16 +161,24 @@ func (n *Nylon) sendEndpointProbe(node state.NodeId, ep *state.NylonEndpoint, ti
 }
 
 func handleProbe(n *Nylon, pkt *protocol.Ny_Probe, endpoint conn.Endpoint, peer *device.Peer, node state.NodeId) {
-	if pkt.ResponseToken == nil {
-		// ping
-		// build pong response
-		responseToken := pkt.Token
+	rxTs := probeNowNs()
+	if pkt.TxTs == 0 {
+		return // legacy or malformed probe, cannot be measured
+	}
+	if !pkt.Reply {
+		// ping: answer immediately in-dataplane, echoing the ping's
+		// timestamps so the sender can compute its outbound relative
+		// one-way delay and the hold-time-corrected RTT.
+		origin := pkt.TxTs
+		originRx := rxTs
 		res := &protocol.Ny_Probe{
-			Token:         pkt.Token,
-			ResponseToken: &responseToken,
+			Reply:       true,
+			ReplyLinkId: pkt.LinkId,
+			OriginTxTs:  &origin,
+			OriginRxTs:  &originRx,
 		}
+		res.TxTs = nextProbeTxNs()
 
-		// send pong
 		err := n.SendNylon(&protocol.Ny{Type: &protocol.Ny_ProbeOp{ProbeOp: res}}, endpoint, peer)
 		if err != nil {
 			n.Log.Error("Failed to send nylon packet to node", "node", node, "error", err)
@@ -134,19 +186,27 @@ func handleProbe(n *Nylon, pkt *protocol.Ny_Probe, endpoint conn.Endpoint, peer 
 		}
 
 		n.Dispatch(func() error {
-			handleProbePing(n, node, endpoint)
+			handleProbePing(n, node, pkt, endpoint, rxTs)
 			return nil
 		})
 	} else {
-		// pong
 		n.Dispatch(func() error {
-			handleProbePong(n, node, pkt.Token, endpoint)
+			handleProbePong(n, node, pkt, endpoint, rxTs)
 			return nil
 		})
 	}
 }
 
-func handleProbePing(n *Nylon, node state.NodeId, wgEndpoint conn.Endpoint) {
+// observeProbe folds the timestamps of a received probe into the endpoint's
+// delay filters.
+func observeProbe(dep *state.NylonEndpoint, pkt *protocol.Ny_Probe, rxTs int64) {
+	dep.ObserveInbound(pkt.TxTs, rxTs)
+	if pkt.OriginTxTs != nil && pkt.OriginRxTs != nil {
+		dep.ObserveEcho(*pkt.OriginTxTs, *pkt.OriginRxTs)
+	}
+}
+
+func handleProbePing(n *Nylon, node state.NodeId, pkt *protocol.Ny_Probe, wgEndpoint conn.Endpoint, rxTs int64) {
 	if node == n.LocalCfg.Id {
 		return
 	}
@@ -163,6 +223,7 @@ func handleProbePing(n *Nylon, node state.NodeId, wgEndpoint conn.Endpoint) {
 
 				wasInactive := !dep.IsActive()
 				dep.Renew()
+				observeProbe(dep, pkt, rxTs)
 				if wasInactive {
 					ComputeRoutes(n.RouterState, n)
 					n.UpdateNeighbour(node)
@@ -180,6 +241,7 @@ func handleProbePing(n *Nylon, node state.NodeId, wgEndpoint conn.Endpoint) {
 		if neigh.Id == node {
 			newEp := state.NewEndpoint(state.NewDynamicEndpoint(wgEndpoint.DstIPPort().String()), true, wgEndpoint, &n.RouterTunables)
 			newEp.Renew()
+			observeProbe(newEp, pkt, rxTs)
 			neigh.Eps = append(neigh.Eps, newEp)
 			// push route update to improve convergence time
 			ComputeRoutes(n.RouterState, n)
@@ -189,30 +251,39 @@ func handleProbePing(n *Nylon, node state.NodeId, wgEndpoint conn.Endpoint) {
 	}
 }
 
-func handleProbePong(n *Nylon, node state.NodeId, token uint64, ep conn.Endpoint) {
-	linkHealth, ok := n.PingBuf.GetAndDelete(token)
-	if !ok {
-		return
+func handleProbePong(n *Nylon, node state.NodeId, pkt *protocol.Ny_Probe, ep conn.Endpoint, rxTs int64) {
+	if pkt.OriginTxTs != nil {
+		if linkHealth, ok := n.PingBuf.GetAndDelete(uint64(*pkt.OriginTxTs)); ok {
+			health := linkHealth.Value()
+			if health.Peer != "" && health.Peer != node {
+				n.Log.Warn("probe came back from wrong peer", "expected", health.Peer, "actual", node)
+			} else if health.Endpoint == nil || health.Endpoint.LinkId != pkt.ReplyLinkId {
+				n.Log.Warn("probe reply did not match its recorded endpoint", "from", ep.DstToString(), "node", node, "linkId", pkt.ReplyLinkId)
+			} else {
+				health.Complete(protocol.EndpointProbeStatus_ENDPOINT_PROBE_REPLIED, time.Since(health.TimeSent))
+			}
+		}
 	}
-	health := linkHealth.Value()
-	if health.Peer != "" && health.Peer != node {
-		n.Log.Warn("probe came back from wrong peer", "expected", health.Peer, "actual", node)
-		return
-	}
-	latency := time.Since(health.TimeSent)
-	health.Complete(protocol.EndpointProbeStatus_ENDPOINT_PROBE_REPLIED, latency)
 
-	dpLink := health.Endpoint
-	if dpLink == nil {
-		n.Log.Warn("probe came back without a recorded endpoint", "from", ep.DstToString(), "node", node)
+	neigh := n.RouterState.GetNeighbour(node)
+	if neigh == nil {
+		n.Log.Warn("probe reply from unknown neighbour", "from", ep.DstToString(), "node", node)
 		return
 	}
+	idx := slices.IndexFunc(neigh.Eps, func(link state.Endpoint) bool {
+		nep := link.AsNylonEndpoint()
+		return nep != nil && nep.LinkId == pkt.ReplyLinkId
+	})
+	if idx == -1 {
+		n.Log.Warn("probe reply for unknown link", "from", ep.DstToString(), "node", node, "linkId", pkt.ReplyLinkId)
+		return
+	}
+	dpLink := neigh.Eps[idx].AsNylonEndpoint()
 	if n.DBG_log_probe {
-		n.Log.Debug("probe back", "peer", node, "ping", latency)
+		n.Log.Debug("probe back", "peer", node, "rtt", dpLink.FilteredPing())
 	}
 	dpLink.Renew()
-	dpLink.UpdatePing(latency)
-	dpLink.RecordProbe(true)
+	observeProbe(dpLink, pkt, rxTs)
 
 	// Record the reply's current WireGuard endpoint on the endpoint that sent the probe.
 	dpLink.WgEndpoint = ep

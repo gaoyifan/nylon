@@ -359,10 +359,41 @@ func (x *Ny_SeqnoRequest) GetHopCount() uint32 {
 	return 0
 }
 
+// Probe implements RFC 9616-style (Babel Timestamp sub-TLV) delay
+// measurement with relative timestamps. Every probe carries the sender's
+// transmit timestamp; whenever the sender has previously heard a probe on
+// the same link it also echoes that probe's timestamps. From a single
+// received probe a node can derive the *relative* one-way delay of the
+// inbound direction (local rx time - peer tx time, which embeds the
+// unknown clock offset between the two nodes), and from the echo it can
+// derive the relative one-way delay of the outbound direction as measured
+// by the peer. Clock offsets cancel when the two directions are combined
+// (RTT) or when links to the same peer are compared against each other,
+// which is exactly what the router needs.
 type Ny_Probe struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Token         uint64                 `protobuf:"varint,1,opt,name=Token,proto3" json:"Token,omitempty"`
-	ResponseToken *uint64                `protobuf:"varint,2,opt,name=ResponseToken,proto3,oneof" json:"ResponseToken,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Transmit timestamp of this probe, in nanoseconds on the sender's
+	// monotonic clock. The epoch is arbitrary (per-process), so only
+	// differences between timestamps from the same sender are meaningful.
+	TxTs int64 `protobuf:"varint,3,opt,name=TxTs,proto3" json:"TxTs,omitempty"`
+	// Reply probes (pongs) are sent immediately in response to a non-reply
+	// probe and are never answered themselves.
+	Reply bool `protobuf:"varint,4,opt,name=Reply,proto3" json:"Reply,omitempty"`
+	// LinkId identifies the sender's local link (endpoint) state. A reply
+	// copies the value into ReplyLinkId so the original sender can attribute
+	// the reply to the exact link it probed, even when several links share a
+	// remote address or the reply source address was rewritten by a NAT.
+	LinkId      uint64 `protobuf:"varint,5,opt,name=LinkId,proto3" json:"LinkId,omitempty"`
+	ReplyLinkId uint64 `protobuf:"varint,6,opt,name=ReplyLinkId,proto3" json:"ReplyLinkId,omitempty"`
+	// Echo of the most recent probe received from the peer on this link:
+	// OriginTxTs is that probe's TxTs (on the peer's clock) and OriginRxTs
+	// is the local time it was received (on the sender's clock). Combined
+	// with TxTs and the receive time of this probe, the peer can compute the
+	// outbound relative one-way delay (OriginRxTs - OriginTxTs) and the
+	// offset-free RTT (rx - OriginTxTs) - (TxTs - OriginRxTs), which
+	// excludes the time this node held the echo.
+	OriginTxTs    *int64 `protobuf:"varint,7,opt,name=OriginTxTs,proto3,oneof" json:"OriginTxTs,omitempty"`
+	OriginRxTs    *int64 `protobuf:"varint,8,opt,name=OriginRxTs,proto3,oneof" json:"OriginRxTs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -397,16 +428,44 @@ func (*Ny_Probe) Descriptor() ([]byte, []int) {
 	return file_protocol_nylon_proto_rawDescGZIP(), []int{1, 3}
 }
 
-func (x *Ny_Probe) GetToken() uint64 {
+func (x *Ny_Probe) GetTxTs() int64 {
 	if x != nil {
-		return x.Token
+		return x.TxTs
 	}
 	return 0
 }
 
-func (x *Ny_Probe) GetResponseToken() uint64 {
-	if x != nil && x.ResponseToken != nil {
-		return *x.ResponseToken
+func (x *Ny_Probe) GetReply() bool {
+	if x != nil {
+		return x.Reply
+	}
+	return false
+}
+
+func (x *Ny_Probe) GetLinkId() uint64 {
+	if x != nil {
+		return x.LinkId
+	}
+	return 0
+}
+
+func (x *Ny_Probe) GetReplyLinkId() uint64 {
+	if x != nil {
+		return x.ReplyLinkId
+	}
+	return 0
+}
+
+func (x *Ny_Probe) GetOriginTxTs() int64 {
+	if x != nil && x.OriginTxTs != nil {
+		return *x.OriginTxTs
+	}
+	return 0
+}
+
+func (x *Ny_Probe) GetOriginRxTs() int64 {
+	if x != nil && x.OriginRxTs != nil {
+		return *x.OriginRxTs
 	}
 	return 0
 }
@@ -417,7 +476,7 @@ const file_protocol_nylon_proto_rawDesc = "" +
 	"\n" +
 	"\x14protocol/nylon.proto\x12\x05proto\"6\n" +
 	"\x0fTransportBundle\x12#\n" +
-	"\aPackets\x18\x01 \x03(\v2\t.proto.NyR\aPackets\"\xc9\x04\n" +
+	"\aPackets\x18\x01 \x03(\v2\t.proto.NyR\aPackets\"\xcf\x05\n" +
 	"\x02Ny\x12,\n" +
 	"\aRouteOp\x18\x01 \x01(\v2\x10.proto.Ny.UpdateH\x00R\aRouteOp\x12@\n" +
 	"\x0eSeqnoRequestOp\x18\x02 \x01(\v2\x16.proto.Ny.SeqnoRequestH\x00R\x0eSeqnoRequestOp\x12+\n" +
@@ -435,11 +494,20 @@ const file_protocol_nylon_proto_rawDesc = "" +
 	"\bRouterId\x18\x01 \x01(\tR\bRouterId\x12\x16\n" +
 	"\x06Prefix\x18\x02 \x01(\fR\x06Prefix\x12\x14\n" +
 	"\x05Seqno\x18\x03 \x01(\rR\x05Seqno\x12\x1a\n" +
-	"\bHopCount\x18\x04 \x01(\rR\bHopCount\x1aZ\n" +
-	"\x05Probe\x12\x14\n" +
-	"\x05Token\x18\x01 \x01(\x04R\x05Token\x12)\n" +
-	"\rResponseToken\x18\x02 \x01(\x04H\x00R\rResponseToken\x88\x01\x01B\x10\n" +
-	"\x0e_ResponseTokenB\x06\n" +
+	"\bHopCount\x18\x04 \x01(\rR\bHopCount\x1a\xdf\x01\n" +
+	"\x05Probe\x12\x12\n" +
+	"\x04TxTs\x18\x03 \x01(\x03R\x04TxTs\x12\x14\n" +
+	"\x05Reply\x18\x04 \x01(\bR\x05Reply\x12\x16\n" +
+	"\x06LinkId\x18\x05 \x01(\x04R\x06LinkId\x12 \n" +
+	"\vReplyLinkId\x18\x06 \x01(\x04R\vReplyLinkId\x12#\n" +
+	"\n" +
+	"OriginTxTs\x18\a \x01(\x03H\x00R\n" +
+	"OriginTxTs\x88\x01\x01\x12#\n" +
+	"\n" +
+	"OriginRxTs\x18\b \x01(\x03H\x01R\n" +
+	"OriginRxTs\x88\x01\x01B\r\n" +
+	"\v_OriginTxTsB\r\n" +
+	"\v_OriginRxTsJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03B\x06\n" +
 	"\x04typeB\vZ\tprotocol/b\x06proto3"
 
 var (

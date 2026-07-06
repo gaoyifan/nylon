@@ -37,16 +37,17 @@ var (
 )
 
 type Harness struct {
-	t          *testing.T
-	mu         sync.Mutex
-	ctx        context.Context
-	Network    *testcontainers.DockerNetwork
-	Nodes      map[string]testcontainers.Container
-	LogManager *LogManager
-	ImageName  string
-	RootDir    string
-	Subnet     string
-	Gateway    string
+	t             *testing.T
+	mu            sync.Mutex
+	ctx           context.Context
+	Network       *testcontainers.DockerNetwork
+	Nodes         map[string]testcontainers.Container
+	LogManager    *LogManager
+	ImageName     string
+	RootDir       string
+	Subnet        string
+	Gateway       string
+	extraNetworks []*testcontainers.DockerNetwork
 }
 
 // NewHarness creates a test harness with a unique subnet
@@ -113,12 +114,46 @@ func NewHarness(t *testing.T) *Harness {
 	return h
 }
 
+// NewExtraNetwork creates an additional isolated docker network (with its own
+// non-overlapping subnet) that nodes can attach to besides the default one,
+// e.g. to model several distinct physical paths between the same nodes.
+func (h *Harness) NewExtraNetwork() (*testcontainers.DockerNetwork, string) {
+	networkMu.Lock()
+	defer networkMu.Unlock()
+	subnet, gateway, err := AllocateDockerSubnet(h.ctx)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	nw, err := tcnetwork.New(h.ctx,
+		tcnetwork.WithAttachable(),
+		tcnetwork.WithDriver("bridge"),
+		tcnetwork.WithIPAM(&network.IPAM{
+			Driver: "default",
+			Config: []network.IPAMConfig{
+				{
+					Subnet:  netip.MustParsePrefix(subnet),
+					Gateway: netip.MustParseAddr(gateway),
+				},
+			},
+		}))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.extraNetworks = append(h.extraNetworks, nw)
+	h.mu.Unlock()
+	return nw, subnet
+}
+
 type NodeSpec struct {
 	Name              string
 	IP                string
 	CentralConfigPath string
 	NodeConfigPath    string
 	ExtraArgs         []string
+	// ExtraNetworks maps additional docker network names to the static IP the
+	// node should get on each of them.
+	ExtraNetworks map[string]string
 }
 
 func (h *Harness) StartNodes(specs ...NodeSpec) {
@@ -127,12 +162,23 @@ func (h *Harness) StartNodes(specs ...NodeSpec) {
 	for _, spec := range specs {
 		go func(s NodeSpec) {
 			defer wg.Done()
-			h.StartNode(s.Name, s.IP, s.CentralConfigPath, s.NodeConfigPath, s.ExtraArgs...)
+			h.StartNodeSpec(s)
 		}(spec)
 	}
 	wg.Wait()
 }
 func (h *Harness) StartNode(name string, ip string, centralConfigPath, nodeConfigPath string, extraArgs ...string) testcontainers.Container {
+	return h.StartNodeSpec(NodeSpec{
+		Name:              name,
+		IP:                ip,
+		CentralConfigPath: centralConfigPath,
+		NodeConfigPath:    nodeConfigPath,
+		ExtraArgs:         extraArgs,
+	})
+}
+func (h *Harness) StartNodeSpec(spec NodeSpec) testcontainers.Container {
+	name, ip := spec.Name, spec.IP
+	centralConfigPath, nodeConfigPath := spec.CentralConfigPath, spec.NodeConfigPath
 	h.t.Logf("Starting node %s at %s", name, ip)
 	req := testcontainers.ContainerRequest{
 		Image:    ImageName,
@@ -152,7 +198,7 @@ func (h *Harness) StartNode(name string, ip string, centralConfigPath, nodeConfi
 				FileMode:          0644,
 			},
 		},
-		Cmd: extraArgs,
+		Cmd: spec.ExtraArgs,
 		Env: map[string]string{
 			"NYLON_LOG_LEVEL": "debug",
 		},
@@ -179,9 +225,36 @@ func (h *Harness) StartNode(name string, ip string, centralConfigPath, nodeConfi
 	}
 	cont, err := testcontainers.GenericContainer(h.ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
-		Started:          true,
+		Started:          false,
 	})
 	if err != nil {
+		h.t.Fatalf("failed to create container %s: %v", name, err)
+	}
+	// testcontainers cannot assign static IPs on secondary networks, so
+	// attach them ourselves through the docker API before starting
+	if len(spec.ExtraNetworks) > 0 {
+		provider, err := testcontainers.NewDockerProvider()
+		if err != nil {
+			h.t.Fatalf("failed to create docker provider: %v", err)
+		}
+		defer provider.Close()
+		for nw, extraIP := range spec.ExtraNetworks {
+			settings := &network.EndpointSettings{}
+			if extraIP != "" {
+				settings.IPAMConfig = &network.EndpointIPAMConfig{
+					IPv4Address: netip.MustParseAddr(extraIP),
+				}
+			}
+			_, err := provider.Client().NetworkConnect(h.ctx, nw, client.NetworkConnectOptions{
+				Container:      cont.GetContainerID(),
+				EndpointConfig: settings,
+			})
+			if err != nil {
+				h.t.Fatalf("failed to attach %s to network %s: %v", name, nw, err)
+			}
+		}
+	}
+	if err := cont.Start(h.ctx); err != nil {
 		h.t.Fatalf("failed to start container %s: %v", name, err)
 	}
 	h.mu.Lock()
@@ -333,6 +406,11 @@ func (h *Harness) Cleanup() {
 	}
 	if err := h.Network.Remove(context.Background()); err != nil {
 		h.t.Logf("failed to remove network: %v", err)
+	}
+	for _, nw := range h.extraNetworks {
+		if err := nw.Remove(context.Background()); err != nil {
+			h.t.Logf("failed to remove extra network: %v", err)
+		}
 	}
 }
 func (h *Harness) Exec(nodeName string, cmd []string) (string, string, error) {

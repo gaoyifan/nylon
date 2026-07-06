@@ -67,6 +67,16 @@ message EndpointInfo {
   string local_bind_interface = 10;
   string local_bind_source = 11;
   float loss_rate = 12;
+  // Excess one-way delay of this link relative to the neighbour's best link
+  // in each direction (absolute one-way delays are unknowable without
+  // synchronized clocks, but differences between links of the same
+  // neighbour are exact). The preferred link in a direction shows 0; -1
+  // when the link has not collected enough samples.
+  int64 out_excess_ns = 13;
+  int64 in_excess_ns = 14;
+  // selected is true for the link this node currently sends on (the active
+  // link with the lowest outbound delay + loss score).
+  bool selected = 15;
 }
 
 message WireGuardPeerStats {
@@ -85,6 +95,11 @@ message NeighbourInfo {
   repeated NeighRoute routes = 5;
   repeated Advertisement advertised = 6;
   WireGuardPeerStats wireguard = 7;
+  // link_cost is the single-hop cost towards this neighbour advertised to
+  // the routing layer: the effective cycle latency (best outbound + best
+  // inbound link, chosen independently per direction) penalized by the
+  // coupled loss of the two selected links. Expressed in microseconds.
+  uint32 link_cost = 8;
 }
 
 message RouteTableEntry {

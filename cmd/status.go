@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/encodeous/nylon/core"
 	"github.com/encodeous/nylon/protocol"
@@ -98,14 +99,13 @@ func renderStatus(s *protocol.StatusResponse, opts statusRenderOptions) {
 			suffix = " " + p.warn("[passive client]")
 		}
 		fmt.Printf("  %s %s%s\n", p.key(neigh.PeerId), p.value("("+neigh.PublicKey+")"), suffix)
-		best := bestEndpoint(neigh.Endpoints)
-		bestMetric := uint32(state.INF)
-		if best != nil {
-			bestMetric = best.Metric
+		linkCost := uint32(state.INF)
+		if neigh.LinkCost != 0 {
+			linkCost = neigh.LinkCost
 		}
 		wg := neigh.GetWireguard()
-		statHeaders := []string{"best metric", "latest handshake", "tx", "rx"}
-		statRow := []string{metricText(p, bestMetric), formatHandshake(wg.LatestHandshakeUnix), formatBytes(wg.TxBytes), formatBytes(wg.RxBytes)}
+		statHeaders := []string{"link cost", "latest handshake", "tx", "rx"}
+		statRow := []string{metricText(p, linkCost), formatHandshake(wg.LatestHandshakeUnix), formatBytes(wg.TxBytes), formatBytes(wg.RxBytes)}
 		if wg.Endpoint != nil {
 			statHeaders = append(statHeaders, "wireguard endpoint")
 			statRow = append(statRow, *wg.Endpoint)
@@ -113,7 +113,7 @@ func renderStatus(s *protocol.StatusResponse, opts statusRenderOptions) {
 		printTable(p, 2, statHeaders, [][]string{statRow})
 		if len(neigh.Endpoints) > 0 {
 			fmt.Println("    " + p.section("endpoints:"))
-			printEndpoints(p, neigh.Endpoints, best, opts.showFull)
+			printEndpoints(p, neigh.Endpoints, opts.showFull)
 		}
 		if opts.showRoutes && len(neigh.Routes) > 0 {
 			fmt.Println("    " + p.section("advertised routes:"))
@@ -191,42 +191,26 @@ func printTableRoutes(p paletteValues, name string, routes []*protocol.RouteTabl
 	printTable(p, 2, []string{"prefix", "nh"}, rows)
 }
 
-func endpointFlags(p paletteValues, ep *protocol.EndpointInfo, best *protocol.EndpointInfo) string {
+func endpointFlags(p paletteValues, ep *protocol.EndpointInfo) string {
 	flags := make([]string, 0)
 	if ep.Active {
 		flags = append(flags, p.good("active"))
 	} else {
 		flags = append(flags, p.warn("inactive"))
 	}
-	if best != nil && ep == best {
+	if ep.Selected {
 		flags = append(flags, p.good("best"))
 	}
 	if ep.RemoteInit {
 		flags = append(flags, "remote")
 	}
-	if len(flags) == 0 {
-		return ""
-	}
 	return "[" + strings.Join(flags, ",") + "]"
 }
 
-func bestEndpoint(endpoints []*protocol.EndpointInfo) *protocol.EndpointInfo {
-	var best *protocol.EndpointInfo
-	for _, ep := range endpoints {
-		if !ep.Active {
-			continue
-		}
-		if best == nil || ep.Metric < best.Metric || (ep.Metric == best.Metric && ep.Address < best.Address) {
-			best = ep
-		}
-	}
-	return best
-}
-
-func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, best *protocol.EndpointInfo, full bool) {
+func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, full bool) {
 	headers := []string{"address", "resolved", "metric", "state"}
 	if full {
-		headers = append(headers, "rtt", "stable rtt", "loss")
+		headers = append(headers, "rtt", "stable rtt", "out delay", "in delay", "loss")
 	}
 	rows := make([][]string, 0, len(endpoints))
 	for _, ep := range endpoints {
@@ -234,13 +218,25 @@ func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, best *p
 		if ep.Resolved != nil {
 			resolved = *ep.Resolved
 		}
-		row := []string{ep.Address, resolved, metricText(p, ep.Metric), endpointFlags(p, ep, best)}
+		row := []string{ep.Address, resolved, metricText(p, ep.Metric), endpointFlags(p, ep)}
 		if full {
-			row = append(row, formatDurationNs(ep.FilteredRttNs), formatDurationNs(ep.StabilizedRttNs), formatLossRate(ep.LossRate))
+			row = append(row,
+				formatDurationNs(ep.FilteredRttNs), formatDurationNs(ep.StabilizedRttNs),
+				formatExcessNs(ep.OutExcessNs), formatExcessNs(ep.InExcessNs),
+				formatLossRate(ep.LossRate))
 		}
 		rows = append(rows, row)
 	}
 	printTable(p, 3, headers, rows)
+}
+
+// formatExcessNs renders a link's per-direction excess delay relative to the
+// neighbour's best link ("+0s" for the preferred link, "-" while warming up).
+func formatExcessNs(ns int64) string {
+	if ns < 0 {
+		return "-"
+	}
+	return "+" + time.Duration(ns).Truncate(10*time.Microsecond).String()
 }
 
 func printNeighRoutes(p paletteValues, neigh string, routes []*protocol.NeighRoute, full bool) {

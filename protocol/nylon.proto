@@ -24,9 +24,46 @@ message Ny {
     uint32 HopCount = 4;
   }
 
+  // Probe implements RFC 9616-style (Babel Timestamp sub-TLV) delay
+  // measurement with relative timestamps. Every probe carries the sender's
+  // transmit timestamp; whenever the sender has previously heard a probe on
+  // the same link it also echoes that probe's timestamps. From a single
+  // received probe a node can derive the *relative* one-way delay of the
+  // inbound direction (local rx time - peer tx time, which embeds the
+  // unknown clock offset between the two nodes), and from the echo it can
+  // derive the relative one-way delay of the outbound direction as measured
+  // by the peer. Clock offsets cancel when the two directions are combined
+  // (RTT) or when links to the same peer are compared against each other,
+  // which is exactly what the router needs.
   message Probe {
-    uint64 Token = 1;
-    optional uint64 ResponseToken = 2;
+    // Legacy token-based ping/pong measurement (replaced by timestamps).
+    reserved 1, 2;
+
+    // Transmit timestamp of this probe, in nanoseconds on the sender's
+    // monotonic clock. The epoch is arbitrary (per-process), so only
+    // differences between timestamps from the same sender are meaningful.
+    int64 TxTs = 3;
+
+    // Reply probes (pongs) are sent immediately in response to a non-reply
+    // probe and are never answered themselves.
+    bool Reply = 4;
+
+    // LinkId identifies the sender's local link (endpoint) state. A reply
+    // copies the value into ReplyLinkId so the original sender can attribute
+    // the reply to the exact link it probed, even when several links share a
+    // remote address or the reply source address was rewritten by a NAT.
+    uint64 LinkId = 5;
+    uint64 ReplyLinkId = 6;
+
+    // Echo of the most recent probe received from the peer on this link:
+    // OriginTxTs is that probe's TxTs (on the peer's clock) and OriginRxTs
+    // is the local time it was received (on the sender's clock). Combined
+    // with TxTs and the receive time of this probe, the peer can compute the
+    // outbound relative one-way delay (OriginRxTs - OriginTxTs) and the
+    // offset-free RTT (rx - OriginTxTs) - (TxTs - OriginRxTs), which
+    // excludes the time this node held the echo.
+    optional int64 OriginTxTs = 7;
+    optional int64 OriginRxTs = 8;
   }
 
   oneof type {

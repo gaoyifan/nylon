@@ -2,7 +2,6 @@ package core
 
 import (
 	"bufio"
-	"cmp"
 	"encoding/hex"
 	"fmt"
 	"runtime"
@@ -210,9 +209,7 @@ func (n *Nylon) syncWireGuardEndpoints() error {
 
 		if nhNeigh != nil {
 			links := slices.Clone(nhNeigh.Eps)
-			slices.SortStableFunc(links, func(a, b state.Endpoint) int {
-				return cmp.Compare(a.Metric(), b.Metric())
-			})
+			slices.SortStableFunc(links, state.CompareEndpoints)
 			for _, ep := range links {
 				nep, err := ep.AsNylonEndpoint().GetWgEndpoint(n.Device)
 				if err != nil {

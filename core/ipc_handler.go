@@ -201,6 +201,12 @@ func buildNeighbours(n *Nylon, wgStats map[state.NyPublicKey]device.PeerStatus) 
 			eps = buildEndpoints(neigh)
 			routes = buildNeighRoutes(neigh)
 		}
+		linkCost := uint32(0)
+		if neigh != nil {
+			if lc := neigh.LinkCost(); lc != state.INF {
+				linkCost = lc
+			}
+		}
 		stat := wgStats[cfg.PubKey]
 		neighbours = append(neighbours, &protocol.NeighbourInfo{
 			PeerId:        string(id),
@@ -210,12 +216,34 @@ func buildNeighbours(n *Nylon, wgStats map[state.NyPublicKey]device.PeerStatus) 
 			Routes:        routes,
 			Advertised:    advertisementsForNode(n, id),
 			Wireguard:     wireGuardPeerStatsProto(stat),
+			LinkCost:      linkCost,
 		})
 	}
 	return neighbours
 }
 
 func buildEndpoints(neigh *state.Neighbour) []*protocol.EndpointInfo {
+	// per-direction reference points: the smallest relative one-way delay
+	// among the neighbour's measured links, used to report each link's
+	// excess delay (differences are exact, absolute values are unknowable)
+	var minOut, minIn time.Duration
+	haveRef := false
+	for _, ep := range neigh.Eps {
+		nep := ep.AsNylonEndpoint()
+		if nep == nil || !ep.IsActive() {
+			continue
+		}
+		if out, in, ok := nep.RelDelays(); ok {
+			if !haveRef {
+				minOut, minIn, haveRef = out, in, true
+			} else {
+				minOut = min(minOut, out)
+				minIn = min(minIn, in)
+			}
+		}
+	}
+	best := neigh.BestEndpoint()
+
 	eps := make([]*protocol.EndpointInfo, 0, len(neigh.Eps))
 	for _, ep := range neigh.Eps {
 		nep := ep.AsNylonEndpoint()
@@ -226,6 +254,11 @@ func buildEndpoints(neigh *state.Neighbour) []*protocol.EndpointInfo {
 		bindSource := ""
 		if nep.Bind.Source.IsValid() {
 			bindSource = nep.Bind.Source.String()
+		}
+		outExcess, inExcess := int64(-1), int64(-1)
+		if out, in, ok := nep.RelDelays(); ok && haveRef {
+			outExcess = int64(out - minOut)
+			inExcess = int64(in - minIn)
 		}
 		eps = append(eps, &protocol.EndpointInfo{
 			Address:            nep.DynEP.Value,
@@ -238,9 +271,18 @@ func buildEndpoints(neigh *state.Neighbour) []*protocol.EndpointInfo {
 			LossRate:           float32(nep.LossRate()),
 			LocalBindInterface: nep.Bind.Interface,
 			LocalBindSource:    bindSource,
+			OutExcessNs:        outExcess,
+			InExcessNs:         inExcess,
+			Selected:           ep == best,
 		})
 	}
 	slices.SortFunc(eps, func(a, b *protocol.EndpointInfo) int {
+		if a.Selected != b.Selected {
+			if a.Selected {
+				return -1
+			}
+			return 1
+		}
 		if cmpMetric := cmp.Compare(a.Metric, b.Metric); cmpMetric != 0 {
 			return cmpMetric
 		}

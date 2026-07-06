@@ -34,10 +34,6 @@ func (m MockEndpoint) Node() state.NodeId {
 	return m.node
 }
 
-func (m MockEndpoint) UpdatePing(ping time.Duration) {
-	m.metric = min(uint32(ping.Microseconds()), state.INF)
-}
-
 func (m MockEndpoint) Metric() uint32 {
 	return m.metric
 }

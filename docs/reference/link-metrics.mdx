@@ -1,0 +1,220 @@
+---
+title: Link Metrics & One-Way Delay
+description: How nylon measures per-direction link latency with timestamped probes, selects the best link per direction, and advertises an effective cycle cost to the routing layer.
+---
+
+Nylon measures the latency of every link with timestamped probes, in the
+style of [RFC 9616](https://www.rfc-editor.org/rfc/rfc9616) (Delay-based
+Metric Extension for the Babel Routing Protocol). Unlike a plain RTT
+(round-trip time) measurement, this yields a **separate delay estimate for
+each direction** of every link. Nylon uses these directional measurements in
+two distinct ways:
+
+1. **Single-hop link selection** — among the parallel links to a neighbour,
+   each node independently sends on the link with the lowest *outbound*
+   delay.
+2. **Routing metric** — the cost advertised to the distance-vector routing
+   layer for a neighbour is the **effective cycle latency**: the delay of the
+   round trip that uses the best link in each direction.
+
+This matters whenever parallel links are asymmetric. Consider two links
+between the same pair of nodes:
+
+```
+        link 1:  A ──  5ms ──▶ B      B ── 60ms ──▶ A
+        link 2:  A ── 60ms ──▶ B      B ──  5ms ──▶ A
+```
+
+Both links have an identical RTT of 65ms, so an RTT-based comparison cannot
+tell them apart. With directional measurements, A sends its traffic over
+link 1 and B sends its traffic over link 2 — each direction independently
+uses its fastest path — and the neighbour cost advertised to routing is the
+~10ms fast+fast cycle rather than the 65ms RTT of either link.
+
+Note that this directionality is deliberately confined to single-hop link
+selection between directly connected peers. Network-wide routing still uses
+a single symmetric (RTT-like) cost per hop; making the routing protocol
+itself asymmetric is out of scope.
+
+## Probe protocol
+
+Each node periodically sends a probe to every configured endpoint of every
+neighbour. Probes are small protobuf messages (`Ny_Probe`) delivered inside
+the WireGuard tunnel:
+
+| Field | Meaning |
+| --- | --- |
+| `TxTs` | Transmit timestamp, nanoseconds on the **sender's** monotonic clock |
+| `Reply` | `true` for a pong (sent immediately in response to a ping, never answered itself) |
+| `LinkId` | The sender's process-unique id for the link the probe was sent on |
+| `ReplyLinkId` | In a pong: copy of the ping's `LinkId`, so the original sender can attribute the pong to the exact link it probed |
+| `OriginTxTs`, `OriginRxTs` | Echo of the most recent probe received from the peer on this link: its `TxTs` (peer clock) and the local receive time (sender clock) |
+
+All timestamps are read from a raw monotonic clock — on Linux,
+`CLOCK_MONOTONIC_RAW`, the hardware-based tick counter. Unlike the regular
+monotonic clock (`CLOCK_MONOTONIC`, which backs Go's `time.Since`), the raw
+clock is not frequency-disciplined by NTP: it is immune not only to
+wall-clock steps but also to `adjtimex` slewing (up to ±500ppm), so delay
+measurements never absorb clock-calibration artifacts. The epoch is
+arbitrary (boot time); only differences between timestamps of the *same*
+process are meaningful. Timestamps of two different processes are related by
+an unknown **clock offset** θ (which includes both true clock skew and the
+difference between the two arbitrary epochs).
+
+Pongs are answered directly in the dataplane receive path (before dispatching
+to the router goroutine), so the reply hold time is minimal — and the small
+hold that remains is excluded from the RTT by the echo timestamps, exactly as
+in RFC 9616.
+
+`LinkId`/`ReplyLinkId` replace the old token buffer (`PingBuf`): a pong is
+attributed to a link by the id it carries rather than by a global map of
+outstanding tokens. This removes the token-expiry race and keeps working even
+when several links share a remote address or a NAT rewrites the reply source.
+
+## What a single exchange measures
+
+Suppose A sends a probe at local time `t1`, B receives it at `t2` (B's
+clock), B's next probe towards A carries `TxTs = t3` and the echo
+`(OriginTxTs = t1, OriginRxTs = t2)`, and A receives it at `t4`. A learns:
+
+- **relative outbound delay**: `relOut = t2 − t1 = owd(A→B) + θ`
+- **relative inbound delay**: `relIn = t4 − t3 = owd(B→A) − θ`
+- **offset-free RTT**: `relOut + relIn = (t4 − t1) − (t3 − t2)` — θ cancels,
+  and the peer's hold time `t3 − t2` is subtracted out.
+
+The relative delays embed the unknown offset θ and may even be negative.
+Nylon makes no attempt to estimate θ or recover absolute one-way delays —
+the split of an RTT between its two directions is unknowable without
+synchronized clocks, and estimating it would add complexity without
+improving any decision nylon actually makes. Instead, two exact properties
+of relative delays are used directly:
+
+1. All links to the **same neighbour** share the same θ, so relative delays
+   of parallel links are directly comparable — differences between links are
+   exact. This is all that link selection needs.
+2. In any out+in pair the offsets cancel: `relOut(i) + relIn(j)` is the exact
+   latency of the cycle that goes out on link *i* and comes back on link
+   *j*. This is all that the routing metric needs.
+
+Echoes are validated against a per-link window of pending probes: an echo
+that does not match a pending `TxTs` (stale, duplicated, or predating a local
+restart) is rejected. Probes that stay unanswered for `ProbeTimeout` are
+swept and counted as lost.
+
+## Filtering
+
+Each direction is smoothed independently by the same two-stage pipeline that
+was previously applied to RTTs:
+
+1. **EWMA** (α ≈ 0.08) over raw samples — absorbs per-packet jitter.
+2. **Windowed median with hysteresis** — a sliding window
+   (`WindowSamples`, default 60) of EWMA outputs; the stabilized value only
+   moves when the previous value falls outside the outlier-trimmed range of
+   the window. This keeps the metric flat under noise and prevents route
+   flapping, while still tracking genuine latency changes.
+
+A link reports no delay estimate until both directions have
+`MinimumConfidenceWindow` samples (warmup); until then it falls back to a
+conservative `WarmupDelay` (1s) cost.
+
+If a relative-delay sample jumps by more than `ClockJumpReset` (1 minute),
+the filter assumes the peer's clock epoch moved — i.e. the peer process
+restarted — and resets instead of slowly converging through poisoned
+history.
+
+## Single-hop link selection
+
+For each direction, links to the same neighbour are ranked by a directional
+score built from the stabilized relative delay plus an ETX-style loss
+penalty (see below):
+
+```
+score_out(i) = relOut(i)/(1−p_i) + LossRetxFloor · p_i/(1−p_i)
+```
+
+Since every link to the neighbour shares the same offset θ, the θ terms
+shift all scores equally and never change the ranking. The node sends its
+traffic on the active link with the best outbound score; the peer performs
+the same computation with its own outbound delays and may well pick a
+different link. Links still warming up rank behind links with measurements;
+inactive links rank last.
+
+## Routing metric: effective cycle latency
+
+The single-hop cost advertised to the routing layer (`Neighbour.LinkCost`)
+is not the RTT of any one link, but the latency of the cycle formed by the
+best link **per direction**:
+
+```
+cycle = min_i relOut(i) + min_j relIn(j)
+```
+
+θ cancels in the sum, so the result is an exact, offset-free latency — with
+symmetric links it degenerates to the smallest RTT, and with mirrored
+asymmetric links (the example above) it is the fast+fast cycle that traffic
+actually experiences. It is a round-trip quantity, so it stays compatible
+with all existing RTT-based tunables and hop costs.
+
+Loss is folded in on top of the cycle latency. A round trip is lost if
+either direction loses the packet, so the loss rates of the two selected
+links couple as `p = 1 − (1−p_out)(1−p_in)`, and the final metric applies
+the ETX retransmission model on the cycle:
+
+```
+metric = cycle/(1−p) + LossRetxFloor · p/(1−p)
+```
+
+The result is expressed in microseconds and fed to the distance-vector
+routing layer, where per-hop costs and transit costs are added on top.
+Because the metric is a symmetric per-neighbour cost, Babel's feasibility
+conditions are untouched and route computation works exactly as before —
+the directional intelligence lives entirely inside the hop.
+
+## Loss measurement
+
+Probe loss is tracked per link from the pending-probe window: an accepted
+echo records a success, a swept (timed-out) probe records a loss. The
+smoothed loss rate `p` (EWMA, gated by its own confidence window) feeds both
+the directional selection score and the coupled cycle penalty, so a
+low-delay but lossy link is still penalized by the expected cost of
+retransmissions.
+
+## Observability
+
+`nylon status --full` shows the per-endpoint measurements:
+
+- `sel` — marks the link this node currently sends on (best outbound
+  score).
+- `out delay` / `in delay` — **excess** delay of the link relative to the
+  neighbour's best link in each direction. Absolute one-way delays are
+  unknowable, but these differences are exact; the preferred link in a
+  direction shows `+0s`.
+- `rtt` / `stable rtt` — offset-free RTT from the two filter stages.
+- `loss` — smoothed probe loss rate.
+- `metric` — per-link RTT-based cost (stabilized RTT with the link's own
+  loss penalty), used for display and as a fallback ordering.
+
+Each neighbour also shows its `link cost` — the effective cycle latency
+metric advertised to routing. The same fields are available programmatically
+via the IPC status response (`EndpointInfo.out_excess_ns`, `in_excess_ns`,
+`selected`, `NeighbourInfo.link_cost`).
+
+## Testing
+
+The feature is covered at three levels:
+
+- **Unit tests** (`state/endpoint_test.go`) simulate timestamped probe
+  exchanges with controlled per-direction delays and clock offsets:
+  symmetric and asymmetric links, positive/negative offsets, directional
+  selection and its interaction with loss, coupled-loss cycle costs,
+  warmup fallback, clock-jump resets, echo validation, and loss sweeping.
+- **Integration tests** (`integration/owd_test.go`) run real nylon instances
+  over an in-memory network. The key scenario is the mirrored-asymmetric
+  parallel-link pair shown above, asserting that each side selects its own
+  fast link, that the reported excess delays match the configured asymmetry,
+  and that the advertised neighbour cost is the fast+fast cycle.
+- **End-to-end tests** (`e2e/owd_test.go`) run containerized nylon nodes on
+  two docker networks with asymmetric `tc netem` delays. Because each
+  container is a separate process with its own monotonic epoch, this
+  verifies that selection and the cycle cost are immune to genuinely
+  unsynchronized clocks.
