@@ -271,23 +271,47 @@ func (n *Nylon) handleNylonPacket(packet []byte, endpoint conn.Endpoint, peer *d
 		}
 	}()
 
+	controlPackets := make([]*protocol.Ny, 0, len(bundle.Packets))
 	for _, pkt := range bundle.Packets {
 		switch pkt.Type.(type) {
 		case *protocol.Ny_SeqnoRequestOp:
-			n.Dispatch(func() error {
-				return n.routerHandleSeqnoRequest(neigh, pkt.GetSeqnoRequestOp())
-			})
+			controlPackets = append(controlPackets, pkt)
 		case *protocol.Ny_RouteOp:
-			n.Dispatch(func() error {
-				return n.routerHandleRouteUpdate(neigh, pkt.GetRouteOp())
-			})
+			controlPackets = append(controlPackets, pkt)
 		case *protocol.Ny_AckRetractOp:
-			n.Dispatch(func() error {
-				return n.routerHandleAckRetract(neigh, pkt.GetAckRetractOp())
-			})
+			controlPackets = append(controlPackets, pkt)
 		case *protocol.Ny_ProbeOp:
 			// we don't want to wait for dispatch before responding to this packet
 			handleProbe(n, pkt.GetProbeOp(), endpoint, peer, neigh)
 		}
 	}
+
+	if len(controlPackets) == 0 {
+		return
+	}
+	n.Dispatch(func() error {
+		routeUpdated := false
+		for _, pkt := range controlPackets {
+			switch pkt.Type.(type) {
+			case *protocol.Ny_SeqnoRequestOp:
+				if err := n.routerHandleSeqnoRequest(neigh, pkt.GetSeqnoRequestOp()); err != nil {
+					return err
+				}
+			case *protocol.Ny_RouteOp:
+				applied, err := n.routerApplyRouteUpdate(neigh, pkt.GetRouteOp())
+				if err != nil {
+					return err
+				}
+				routeUpdated = routeUpdated || applied
+			case *protocol.Ny_AckRetractOp:
+				if err := n.routerHandleAckRetract(neigh, pkt.GetAckRetractOp()); err != nil {
+					return err
+				}
+			}
+		}
+		if routeUpdated {
+			ComputeRoutes(n.RouterState, n)
+		}
+		return nil
+	})
 }

@@ -288,7 +288,9 @@ func handleProbePong(n *Nylon, node state.NodeId, pkt *protocol.Ny_Probe, ep con
 	// Record the reply's current WireGuard endpoint on the endpoint that sent the probe.
 	dpLink.WgEndpoint = ep
 
-	ComputeRoutes(n.RouterState, n)
+	// Probe pongs arrive frequently on multi-link meshes. Coalesce route
+	// recomputation so delay samples can update without saturating dispatch.
+	n.ScheduleRouteCompute(n.StarvationDelay)
 }
 
 // endpointFamilyUnreachable reports whether probing ep is pointless because

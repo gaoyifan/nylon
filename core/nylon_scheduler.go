@@ -27,8 +27,10 @@ func NewDispatchFuture[T any](n *Nylon, fun func() (T, error)) Future[T] {
 	return future
 }
 
-// Dispatch Dispatches the function to run on the main thread without waiting for it to complete
-func (n *Nylon) Dispatch(fun func() error) {
+// Dispatch dispatches the function to run on the main thread without waiting
+// for it to complete. It returns false if the dispatch queue is full and the
+// function was dropped.
+func (n *Nylon) Dispatch(fun func() error) bool {
 	defer func() {
 		if r := recover(); r != nil {
 			n.Cancel(fmt.Errorf("dispatch panic: %v", r))
@@ -37,10 +39,10 @@ func (n *Nylon) Dispatch(fun func() error) {
 	for {
 		select {
 		case n.DispatchChannel <- fun:
-			return
+			return true
 		default:
 			n.Log.Error("dispatch channel is full, discarded function", "fun", runtime.FuncForPC(reflect.ValueOf(fun).Pointer()).Name(), "len", len(n.DispatchChannel))
-			return
+			return false
 		}
 	}
 }
