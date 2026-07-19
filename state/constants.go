@@ -7,4 +7,6 @@ const (
 
 	// default port
 	DefaultPort = 57175
+	// LANDiscoveryPort is reserved for LAN discovery announcements.
+	LANDiscoveryPort = 57176
 )

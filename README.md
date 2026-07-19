@@ -14,7 +14,7 @@ Nylon targets under 10 seconds of convergence time after a link failure, as you 
 ### Main Features
 - **Multi-hop Routing**: traffic flows through the lowest-latency path across your mesh. Unlike Tailscale, Nebula, or ZeroTier, nodes don't need to be directly reachable from each other. Nylon forwards through intermediate hops automatically.
 - **No Coordination Server**: no SaaS dependency, no single control-plane. Nodes exchange routes directly over the same WireGuard tunnel that carries your data.
-- **Single Binary, Single Port**: one statically-linked binary, one UDP port (`57175`), one YAML config. That's it.
+- **Single Binary, Single Data Port**: one statically-linked binary, one WireGuard UDP port (`57175`), one YAML config. Optional Linux LAN discovery additionally uses subnet-local UDP `57176` for signed broadcast announcements.
 - **WireGuard Client Compatibility**: connect stock WireGuard clients (iOS, Android, Windows) to the mesh with zero extra software. Mobile clients roam between gateways seamlessly.
 - **Native WireGuard Speeds**: data-plane runs entirely in `wireguard-go` (polyamide), capable of 10+ Gbps throughput.
 

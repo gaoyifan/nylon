@@ -64,6 +64,11 @@ message Ny {
     // excludes the time this node held the echo.
     optional int64 OriginTxTs = 7;
     optional int64 OriginRxTs = 8;
+
+    // Discovery marks the initial authenticated probe for a LAN-discovered
+    // candidate. Receivers use the packet's actual ingress interface to keep
+    // that link separate from unbound configured endpoints.
+    bool Discovery = 9;
   }
 
   oneof type {

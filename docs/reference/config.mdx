@@ -47,6 +47,12 @@ binds:
   - interface: eth0
     source: 2001:db8::10
 
+# Discover graph neighbours that opted in on the same IPv4 LAN. Each listed
+# interface sends signed announcements to its subnet broadcast address on UDP
+# 57176; WireGuard, probes, and data continue to use the node's `port`.
+lan_discovery:
+  - eth0
+
 # Bootstrap: fetch central.yaml from a remote bundle on first start
 dist:
   url: https://static.example.com/network1.nybundle
@@ -64,6 +70,16 @@ post_up:
   - iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -d 192.168.0.0/24 -j MASQUERADE
 post_down: []
 ```
+
+LAN discovery is currently supported on Linux. It only creates links to routers that are already direct neighbours
+in `graph`; it does not change topology or trust. An announcement supplies a
+candidate source address and signed WireGuard port. The endpoint becomes active
+only after a WireGuard-authenticated probe succeeds, and the broadcast
+destination is never used as a routing endpoint. Announcements must arrive from
+UDP `57176` at the matching directed-broadcast address, and discovery probes
+must remain on that enabled interface's IPv4 subnet. Every participant must
+explicitly enable discovery on its local interface. The fixed discovery port is `57176`,
+so a node using LAN discovery cannot also use `57176` as its WireGuard port.
 
 ---
 

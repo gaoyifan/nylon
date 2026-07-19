@@ -95,22 +95,18 @@ func (peer *Peer) SendKeepalive() {
 	peer.SendStagedPackets()
 }
 
-func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
-	if !isRetry {
-		peer.timers.handshakeAttempts.Store(0)
-	}
-
+func (peer *Peer) createHandshakeInitiation() ([]byte, error) {
 	peer.handshake.mutex.RLock()
 	if time.Since(peer.handshake.lastSentHandshake) < RekeyTimeout {
 		peer.handshake.mutex.RUnlock()
-		return nil
+		return nil, nil
 	}
 	peer.handshake.mutex.RUnlock()
 
 	peer.handshake.mutex.Lock()
 	if time.Since(peer.handshake.lastSentHandshake) < RekeyTimeout {
 		peer.handshake.mutex.Unlock()
-		return nil
+		return nil, nil
 	}
 	peer.handshake.lastSentHandshake = time.Now()
 	peer.handshake.mutex.Unlock()
@@ -120,7 +116,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	msg, err := peer.device.CreateMessageInitiation(peer)
 	if err != nil {
 		peer.device.Log.Errorf("%v - Failed to create initiation message: %v", peer, err)
-		return err
+		return nil, err
 	}
 
 	packet := make([]byte, MessageInitiationSize)
@@ -129,6 +125,18 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 
 	peer.timersAnyAuthenticatedPacketTraversal(false)
 	peer.timersAnyAuthenticatedPacketSent()
+	return packet, nil
+}
+
+func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
+	if !isRetry {
+		peer.timers.handshakeAttempts.Store(0)
+	}
+
+	packet, err := peer.createHandshakeInitiation()
+	if err != nil || packet == nil {
+		return err
+	}
 
 	// try a different index every time
 	peer.endpoints.Lock()
@@ -147,6 +155,29 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	}
 	peer.timersHandshakeInitiated()
 
+	return err
+}
+
+// SendHandshakeInitiationTo sends one handshake initiation to endpoint when the
+// peer has no usable current keypair. It applies the normal initiation rate
+// limit, but does not schedule handshake retransmission.
+func (peer *Peer) SendHandshakeInitiationTo(endpoint conn.Endpoint) error {
+	keypair := peer.keypairs.Current()
+	if keypair != nil &&
+		keypair.sendNonce.Load() < RejectAfterMessages &&
+		time.Since(keypair.created) < RejectAfterTime {
+		return nil
+	}
+
+	packet, err := peer.createHandshakeInitiation()
+	if err != nil || packet == nil {
+		return err
+	}
+
+	err = peer.SendBuffers([][]byte{packet}, []conn.Endpoint{endpoint})
+	if err != nil {
+		peer.device.Log.Verbosef("%v - Failed to send handshake initiation: %v", peer, err)
+	}
 	return err
 }
 

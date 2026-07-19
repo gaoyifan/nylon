@@ -69,10 +69,11 @@ type Nylon struct {
 	ConfigPath      string
 
 	// resources
-	Tun       tun.Device
-	wgUapi    net.Listener
-	Interface string
-	Device    *device.Device
+	Tun          tun.Device
+	wgUapi       net.Listener
+	Interface    string
+	Device       *device.Device
+	lanDiscovery *lanDiscoveryService
 
 	// only used for debugging & tests
 	AuxConfig map[string]any
@@ -243,6 +244,10 @@ func (n *Nylon) Init() error {
 	if err != nil {
 		return err
 	}
+	err = n.initLANDiscovery()
+	if err != nil {
+		return err
+	}
 
 	// check for central config updates
 	if n.CentralCfg.Dist != nil {
@@ -327,6 +332,11 @@ endLoop:
 }
 
 func (n *Nylon) Cleanup() error {
+	if n.lanDiscovery != nil {
+		if err := n.lanDiscovery.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			n.Log.Error("failed to close LAN discovery", "error", err)
+		}
+	}
 	if n.PingBuf != nil {
 		n.PingBuf.Stop()
 	}

@@ -74,6 +74,7 @@ type LocalCfg struct {
 	PostUp           []string              `yaml:"post_up,omitempty"`            // a list of commands executed in order after the nylon interface is brought up
 	PostDown         []string              `yaml:"post_down,omitempty"`          // a list of commands executed in order after the nylon interface is brought down
 	Binds            []LocalBind           `yaml:"binds,omitempty"`              // local source/interface selectors used for endpoint probing
+	LANDiscovery     []string              `yaml:"lan_discovery,omitempty"`      // local interfaces participating in LAN endpoint discovery
 
 	// TransitCost makes this node less attractive as a forwarding (transit)
 	// node by adding the given cost to every route learned from neighbours.

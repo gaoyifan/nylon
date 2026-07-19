@@ -29,6 +29,9 @@ func NodeConfigValidator(central *CentralCfg, node *LocalCfg) error {
 	if node.Port == 0 {
 		return fmt.Errorf("port must be greater than 0")
 	}
+	if len(node.LANDiscovery) != 0 && node.Port == LANDiscoveryPort {
+		return fmt.Errorf("port %d is reserved for lan_discovery", LANDiscoveryPort)
+	}
 	if node.Key == [32]byte{} {
 		return fmt.Errorf("private key must not be empty")
 	}
@@ -55,6 +58,21 @@ func NodeConfigValidator(central *CentralCfg, node *LocalCfg) error {
 		seenBinds[bind] = struct{}{}
 		if runtime.GOOS != "linux" {
 			return fmt.Errorf("local binds are only supported on linux")
+		}
+	}
+	if len(node.LANDiscovery) != 0 {
+		if runtime.GOOS != "linux" {
+			return fmt.Errorf("lan_discovery is only supported on linux")
+		}
+		seenInterfaces := make(map[string]struct{}, len(node.LANDiscovery))
+		for _, iface := range node.LANDiscovery {
+			if iface == "" {
+				return fmt.Errorf("lan_discovery interface must not be empty")
+			}
+			if _, ok := seenInterfaces[iface]; ok {
+				return fmt.Errorf("duplicate lan_discovery interface %s", iface)
+			}
+			seenInterfaces[iface] = struct{}{}
 		}
 	}
 	if len(node.DnsResolvers) != 0 {

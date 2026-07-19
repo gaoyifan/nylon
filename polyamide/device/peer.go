@@ -128,10 +128,6 @@ func (peer *Peer) SendBuffers(buffers [][]byte, eps []conn.Endpoint) error {
 
 	peer.endpoints.Lock()
 	endpoints := peer.endpoints.val
-	if len(endpoints) == 0 {
-		peer.endpoints.Unlock()
-		return errors.New("no known endpoints for peer")
-	}
 	if peer.endpoints.clearSrcOnTx {
 		for _, ep := range endpoints {
 			ep.ClearSrc()
@@ -149,6 +145,9 @@ func (peer *Peer) SendBuffers(buffers [][]byte, eps []conn.Endpoint) error {
 		if i == len(buffers) || eps[i] != prevEp {
 			// send batch from prevIdx to i-1
 			if prevEp == nil {
+				if len(endpoints) == 0 {
+					return errors.New("no known endpoints for peer")
+				}
 				prevEp = endpoints[0] // default endpoint
 			}
 			err := peer.device.net.bind.Send(buffers[prevIdx:i], prevEp)

@@ -170,6 +170,20 @@ binds:
 	assert.Equal(t, netip.MustParseAddr("203.0.113.10"), local.Binds[0].Source)
 }
 
+func TestLocalLANDiscoveryYAML(t *testing.T) {
+	var local LocalCfg
+	err := yaml.Unmarshal([]byte(`
+key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+id: alice
+port: 57175
+lan_discovery:
+  - eth0
+  - wlan0
+`), &local)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"eth0", "wlan0"}, local.LANDiscovery)
+}
+
 func TestNodeConfigValidatorRejectsSelectorlessBind(t *testing.T) {
 	local := LocalCfg{
 		Id:    "alice",

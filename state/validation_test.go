@@ -55,6 +55,51 @@ func TestNodeConfigValidator_DnsResolver(t *testing.T) {
 	}))
 }
 
+func TestNodeConfigValidator_LANDiscovery(t *testing.T) {
+	tests := []struct {
+		name      string
+		discovery []string
+		wantError string
+	}{
+		{name: "disabled"},
+		{name: "valid", discovery: []string{"eth0", "wlan0"}},
+		{name: "empty interface", discovery: []string{"eth0", ""}, wantError: "interface must not be empty"},
+		{name: "duplicate interface", discovery: []string{"eth0", "eth0"}, wantError: "duplicate lan_discovery interface eth0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := NodeConfigValidator(nil, &LocalCfg{
+				Id:           "valid-node",
+				Port:         57175,
+				Key:          [32]byte{1},
+				LANDiscovery: tt.discovery,
+			})
+			if tt.wantError == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestNodeConfigValidator_LANDiscoveryPortConflict(t *testing.T) {
+	assert.NoError(t, NodeConfigValidator(nil, &LocalCfg{
+		Id:   "valid-node",
+		Port: LANDiscoveryPort,
+		Key:  [32]byte{1},
+	}))
+
+	err := NodeConfigValidator(nil, &LocalCfg{
+		Id:           "valid-node",
+		Port:         LANDiscoveryPort,
+		Key:          [32]byte{1},
+		LANDiscovery: []string{"eth0"},
+	})
+	assert.ErrorContains(t, err, "reserved for lan_discovery")
+}
+
 func TestCentralConfigValidator_OverlappingPrefix(t *testing.T) {
 	cfg := &CentralCfg{
 		Routers: []RouterCfg{

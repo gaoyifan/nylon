@@ -35,7 +35,7 @@ Notice nodes can have 0 or more accessible endpoints. Nylon will regularly try t
 
 ### Running the network
 
-Before running Nylon, make sure to open UDP port `57175` (or whatever port you configured) so that Nylon can communicate. Without further to do, simply run `nylon run` (you may need CAP_NET_ADMIN or sudo).
+Before running Nylon, make sure to open UDP port `57175` (or whatever data port you configured) so that Nylon can communicate. Nodes with `lan_discovery` enabled must also allow UDP `57176` subnet broadcast on each listed interface. Without further to do, simply run `nylon run` (you may need CAP_NET_ADMIN or sudo).
 
 After a while (5-10 seconds), you will notice that the network has converged!
 

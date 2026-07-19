@@ -392,8 +392,12 @@ type Ny_Probe struct {
 	// outbound relative one-way delay (OriginRxTs - OriginTxTs) and the
 	// offset-free RTT (rx - OriginTxTs) - (TxTs - OriginRxTs), which
 	// excludes the time this node held the echo.
-	OriginTxTs    *int64 `protobuf:"varint,7,opt,name=OriginTxTs,proto3,oneof" json:"OriginTxTs,omitempty"`
-	OriginRxTs    *int64 `protobuf:"varint,8,opt,name=OriginRxTs,proto3,oneof" json:"OriginRxTs,omitempty"`
+	OriginTxTs *int64 `protobuf:"varint,7,opt,name=OriginTxTs,proto3,oneof" json:"OriginTxTs,omitempty"`
+	OriginRxTs *int64 `protobuf:"varint,8,opt,name=OriginRxTs,proto3,oneof" json:"OriginRxTs,omitempty"`
+	// Discovery marks the initial authenticated probe for a LAN-discovered
+	// candidate. Receivers use the packet's actual ingress interface to keep
+	// that link separate from unbound configured endpoints.
+	Discovery     bool `protobuf:"varint,9,opt,name=Discovery,proto3" json:"Discovery,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -470,13 +474,20 @@ func (x *Ny_Probe) GetOriginRxTs() int64 {
 	return 0
 }
 
+func (x *Ny_Probe) GetDiscovery() bool {
+	if x != nil {
+		return x.Discovery
+	}
+	return false
+}
+
 var File_protocol_nylon_proto protoreflect.FileDescriptor
 
 const file_protocol_nylon_proto_rawDesc = "" +
 	"\n" +
 	"\x14protocol/nylon.proto\x12\x05proto\"6\n" +
 	"\x0fTransportBundle\x12#\n" +
-	"\aPackets\x18\x01 \x03(\v2\t.proto.NyR\aPackets\"\xcf\x05\n" +
+	"\aPackets\x18\x01 \x03(\v2\t.proto.NyR\aPackets\"\xed\x05\n" +
 	"\x02Ny\x12,\n" +
 	"\aRouteOp\x18\x01 \x01(\v2\x10.proto.Ny.UpdateH\x00R\aRouteOp\x12@\n" +
 	"\x0eSeqnoRequestOp\x18\x02 \x01(\v2\x16.proto.Ny.SeqnoRequestH\x00R\x0eSeqnoRequestOp\x12+\n" +
@@ -494,7 +505,7 @@ const file_protocol_nylon_proto_rawDesc = "" +
 	"\bRouterId\x18\x01 \x01(\tR\bRouterId\x12\x16\n" +
 	"\x06Prefix\x18\x02 \x01(\fR\x06Prefix\x12\x14\n" +
 	"\x05Seqno\x18\x03 \x01(\rR\x05Seqno\x12\x1a\n" +
-	"\bHopCount\x18\x04 \x01(\rR\bHopCount\x1a\xdf\x01\n" +
+	"\bHopCount\x18\x04 \x01(\rR\bHopCount\x1a\xfd\x01\n" +
 	"\x05Probe\x12\x12\n" +
 	"\x04TxTs\x18\x03 \x01(\x03R\x04TxTs\x12\x14\n" +
 	"\x05Reply\x18\x04 \x01(\bR\x05Reply\x12\x16\n" +
@@ -505,7 +516,8 @@ const file_protocol_nylon_proto_rawDesc = "" +
 	"OriginTxTs\x88\x01\x01\x12#\n" +
 	"\n" +
 	"OriginRxTs\x18\b \x01(\x03H\x01R\n" +
-	"OriginRxTs\x88\x01\x01B\r\n" +
+	"OriginRxTs\x88\x01\x01\x12\x1c\n" +
+	"\tDiscovery\x18\t \x01(\bR\tDiscoveryB\r\n" +
 	"\v_OriginTxTsB\r\n" +
 	"\v_OriginRxTsJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03B\x06\n" +
 	"\x04typeB\vZ\tprotocol/b\x06proto3"
