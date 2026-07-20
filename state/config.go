@@ -46,6 +46,29 @@ type LocalDistributionCfg struct {
 	Url string
 }
 
+type LANDiscoveryInterfaces []string
+
+func (interfaces *LANDiscoveryInterfaces) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var current []string
+	if err := unmarshal(&current); err == nil {
+		*interfaces = current
+		return nil
+	}
+
+	var deployed struct {
+		Interfaces []string `yaml:"interfaces"`
+	}
+	if err := unmarshal(&deployed); err != nil {
+		return err
+	}
+	*interfaces = deployed.Interfaces
+	return nil
+}
+
+func (interfaces LANDiscoveryInterfaces) MarshalYAML() (interface{}, error) {
+	return []string(interfaces), nil
+}
+
 type CentralCfg struct {
 	Dist       *DistributionCfg `yaml:",omitempty"`
 	Routers    []RouterCfg
@@ -59,23 +82,23 @@ type CentralCfg struct {
 type LocalCfg struct {
 	// Node Private Key
 	Key              NyPrivateKey
-	Id               NodeId                // unique id for this node
-	Port             uint16                // Address that the data plane can be accessed by
-	Dist             *LocalDistributionCfg `yaml:",omitempty"`                   // distribution configuration
-	UseSystemRouting bool                  `yaml:"use_system_routing,omitempty"` // all packets from peers will come out of the TUN interface
-	NoNetConfigure   bool                  `yaml:"no_net_configure,omitempty"`   // skip normal route and address setup; transport attachments still apply
-	DnsResolvers     []string              `yaml:"dns_resolvers,omitempty"`      // dns resolvers used by nylon, currently only for config repo
-	InterfaceName    string                `yaml:"interface_name,omitempty"`     // the name of the nylon interface
-	Mtu              int                   `yaml:"mtu,omitempty"`                // MTU of the nylon interface; 0 means the built-in default (1408)
-	LogPath          string                `yaml:"log_path,omitempty"`           // if not empty, nylon will write to this file
-	UnexcludeIPs     []netip.Prefix        `yaml:"unexclude_ips,omitempty"`      // split tunnel, subtracts from centrally excluded ip ranges
-	ExcludeIPs       []netip.Prefix        `yaml:"exclude_ips,omitempty"`        // split tunnel, adds to the centrally excluded ip ranges
-	PreUp            []string              `yaml:"pre_up,omitempty"`             // a list of commands executed in order before the nylon interface is brought up
-	PreDown          []string              `yaml:"pre_down,omitempty"`           // a list of commands executed in order before the nylon interface is brought down
-	PostUp           []string              `yaml:"post_up,omitempty"`            // a list of commands executed in order after the nylon interface is brought up
-	PostDown         []string              `yaml:"post_down,omitempty"`          // a list of commands executed in order after the nylon interface is brought down
-	Binds            []LocalBind           `yaml:"binds,omitempty"`              // local source/interface selectors used for endpoint probing
-	LANDiscovery     []string              `yaml:"lan_discovery,omitempty"`      // local interfaces participating in LAN endpoint discovery
+	Id               NodeId                 // unique id for this node
+	Port             uint16                 // Address that the data plane can be accessed by
+	Dist             *LocalDistributionCfg  `yaml:",omitempty"`                   // distribution configuration
+	UseSystemRouting bool                   `yaml:"use_system_routing,omitempty"` // all packets from peers will come out of the TUN interface
+	NoNetConfigure   bool                   `yaml:"no_net_configure,omitempty"`   // skip normal route and address setup; transport attachments still apply
+	DnsResolvers     []string               `yaml:"dns_resolvers,omitempty"`      // dns resolvers used by nylon, currently only for config repo
+	InterfaceName    string                 `yaml:"interface_name,omitempty"`     // the name of the nylon interface
+	Mtu              int                    `yaml:"mtu,omitempty"`                // MTU of the nylon interface; 0 means the built-in default (1408)
+	LogPath          string                 `yaml:"log_path,omitempty"`           // if not empty, nylon will write to this file
+	UnexcludeIPs     []netip.Prefix         `yaml:"unexclude_ips,omitempty"`      // split tunnel, subtracts from centrally excluded ip ranges
+	ExcludeIPs       []netip.Prefix         `yaml:"exclude_ips,omitempty"`        // split tunnel, adds to the centrally excluded ip ranges
+	PreUp            []string               `yaml:"pre_up,omitempty"`             // a list of commands executed in order before the nylon interface is brought up
+	PreDown          []string               `yaml:"pre_down,omitempty"`           // a list of commands executed in order before the nylon interface is brought down
+	PostUp           []string               `yaml:"post_up,omitempty"`            // a list of commands executed in order after the nylon interface is brought up
+	PostDown         []string               `yaml:"post_down,omitempty"`          // a list of commands executed in order after the nylon interface is brought down
+	Binds            []LocalBind            `yaml:"binds,omitempty"`              // local source/interface selectors used for endpoint probing
+	LANDiscovery     LANDiscoveryInterfaces `yaml:"lan_discovery,omitempty"`      // local interfaces participating in LAN endpoint discovery
 
 	// TransitCost makes this node less attractive as a forwarding (transit)
 	// node by adding the given cost to every route learned from neighbours.

@@ -181,7 +181,25 @@ lan_discovery:
   - wlan0
 `), &local)
 	assert.NoError(t, err)
-	assert.Equal(t, []string{"eth0", "wlan0"}, local.LANDiscovery)
+	assert.Equal(t, LANDiscoveryInterfaces{"eth0", "wlan0"}, local.LANDiscovery)
+
+	var deployed LocalCfg
+	err = yaml.Unmarshal([]byte(`
+key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+id: alice
+port: 57175
+lan_discovery:
+  interfaces:
+    - eth0
+    - wlan0
+`), &deployed)
+	assert.NoError(t, err)
+	assert.Equal(t, LANDiscoveryInterfaces{"eth0", "wlan0"}, deployed.LANDiscovery)
+
+	encoded, err := yaml.Marshal(deployed)
+	assert.NoError(t, err)
+	assert.Contains(t, string(encoded), "lan_discovery:\n- eth0\n- wlan0")
+	assert.NotContains(t, string(encoded), "interfaces:")
 }
 
 func TestRouterTCPObfuscationYAML(t *testing.T) {
