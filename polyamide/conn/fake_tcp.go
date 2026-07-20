@@ -298,11 +298,15 @@ func marshalFakeTCPPacket(packet fakeTCPPacket) []byte {
 	length := faketcp.CarrierHeaderSize + len(packet.payload)
 	if packet.flags&faketcp.TCPFlagSYN != 0 {
 		length += faketcp.SYNOptionSize
+	} else if len(packet.payload) > 0 {
+		length += faketcp.FrameHeaderSize
 	}
 	carrier := make([]byte, length)
 	binary.BigEndian.PutUint16(carrier[0:2], faketcp.CarrierMagic)
 	if len(packet.payload) > 0 {
-		binary.BigEndian.PutUint16(carrier[2:4], faketcp.FoldPayloadChecksum(packet.payload))
+		binary.BigEndian.PutUint16(carrier[faketcp.CarrierHeaderSize:], uint16(len(packet.payload)))
+		copy(carrier[faketcp.CarrierHeaderSize+faketcp.FrameHeaderSize:], packet.payload)
+		binary.BigEndian.PutUint16(carrier[2:4], faketcp.FoldPayloadChecksum(carrier[faketcp.CarrierHeaderSize:]))
 	} else {
 		carrier[3] = packet.flags
 	}
@@ -310,8 +314,6 @@ func marshalFakeTCPPacket(packet fakeTCPPacket) []byte {
 	binary.BigEndian.PutUint32(carrier[8:12], packet.ack)
 	if packet.flags&faketcp.TCPFlagSYN != 0 {
 		copy(carrier[12:16], []byte{1, 3, 3, 14})
-	} else {
-		copy(carrier[12:], packet.payload)
 	}
 	return carrier
 }
@@ -361,38 +363,52 @@ func (s *StdNetBind) sendFakeTCPData(bufs [][]byte, ep *StdNetEndpoint) error {
 	packets := make([]fakeTCPPacket, len(bufs))
 	for i, buf := range bufs {
 		packets[i] = fakeTCPPacket{
-			flags:   faketcp.TCPFlagACK | faketcp.TCPFlagPSH,
+			flags:   faketcp.TCPFlagACK,
 			seq:     flow.sendNext,
 			ack:     flow.recvNext,
 			payload: buf,
 		}
-		flow.sendNext += uint32(len(buf))
+		flow.sendNext += uint32(faketcp.FrameHeaderSize + len(buf))
 	}
 	flow.receivedUnacked = 0
 	s.fakeTCPMu.Unlock()
 	return s.sendFakeTCPPackets(ep, packets)
 }
 
-func (s *StdNetBind) receiveFakeTCP(carrier []byte, ep *StdNetEndpoint) (int, bool) {
+func (s *StdNetBind) receiveFakeTCP(carrier []byte, ep *StdNetEndpoint) ([]byte, int, bool) {
 	if len(carrier) < 2 || binary.BigEndian.Uint16(carrier[:2]) != faketcp.CarrierMagic {
-		return 0, false
+		return nil, 0, false
 	}
 	if len(carrier) < faketcp.CarrierHeaderSize {
-		return 0, true
+		return nil, 0, true
 	}
 	flags := uint8(binary.BigEndian.Uint16(carrier[2:4]))
 	payloadAt := faketcp.CarrierHeaderSize
 	if flags&faketcp.TCPFlagSYN != 0 {
 		if len(carrier) < faketcp.CarrierHeaderSize+faketcp.SYNOptionSize {
-			return 0, true
+			return nil, 0, true
 		}
 		payloadAt += faketcp.SYNOptionSize
+	}
+	payload := carrier[payloadAt:]
+	frameCount := 0
+	if flags&faketcp.TCPFlagSYN == 0 && len(payload) > 0 {
+		for remaining := payload; len(remaining) > 0; frameCount++ {
+			if len(remaining) < faketcp.FrameHeaderSize {
+				return nil, 0, true
+			}
+			length := int(binary.BigEndian.Uint16(remaining[:faketcp.FrameHeaderSize]))
+			if length == 0 || length > len(remaining)-faketcp.FrameHeaderSize {
+				return nil, 0, true
+			}
+			remaining = remaining[faketcp.FrameHeaderSize+length:]
+		}
 	}
 	packet := fakeTCPPacket{
 		flags:   flags,
 		seq:     binary.BigEndian.Uint32(carrier[4:8]),
 		ack:     binary.BigEndian.Uint32(carrier[8:12]),
-		payload: carrier[payloadAt:],
+		payload: payload,
 	}
 	ep.SetTransport(TransportFakeTCP)
 	response, deliver := s.handleFakeTCPPacket(ep, packet)
@@ -400,7 +416,7 @@ func (s *StdNetBind) receiveFakeTCP(carrier []byte, ep *StdNetEndpoint) (int, bo
 		_ = s.sendFakeTCPPackets(ep, []fakeTCPPacket{response})
 	}
 	if !deliver {
-		return 0, true
+		return nil, 0, true
 	}
-	return copy(carrier, packet.payload), true
+	return payload, frameCount, true
 }

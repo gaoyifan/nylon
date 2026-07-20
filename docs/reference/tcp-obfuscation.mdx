@@ -22,7 +22,8 @@ Each participating router needs:
 - `tcp_obfuscation: true` in its router entry in `central.yaml`.
 - At least one named-interface `bind` in its own `node.yaml`.
 - Permission to load eBPF programs and attach TCX programs to that interface.
-- `rx-lro` and `rx-gro-hw` disabled on every named bind interface.
+- The separate ethtool feature `rx-gro-list` left at its Linux default of off.
+  Interface LRO and hardware GRO may remain enabled.
 
 For every published endpoint, UDP and TCP must use the same public port number.
 `port` is required in `node.yaml`; `57175` is only the conventional value. A
@@ -86,24 +87,6 @@ Once the carrier is established, a WireGuard-authenticated probe can teach the
 receiving router a reverse `fake-tcp` candidate. The two routers therefore do
 not both need published endpoints.
 
-### Disable hardware receive aggregation
-
-Inspect the interface features before starting Nylon:
-
-```sh
-ethtool -k eth0
-```
-
-Both LRO and hardware GRO must be off. They can be disabled with:
-
-```sh
-sudo ethtool -K eth0 lro off rx-gro-hw off
-```
-
-Nylon checks the kernel features named `rx-lro` and `rx-gro-hw` at startup and
-refuses to attach the transport while either is active. Keep both features off
-for the lifetime of the process.
-
 ### Validate and restart
 
 Validate the configuration before deployment:
@@ -112,9 +95,9 @@ Validate the configuration before deployment:
 nylon verify central.yaml --node node.yaml
 ```
 
-Validation checks the platform and named-interface bind. Kernel version,
-interface features, and TCX attachment are checked when Nylon starts. Changing
-the local router's `tcp_obfuscation` value requires a restart.
+Validation checks the platform and named-interface bind. Kernel version and TCX
+attachment are checked when Nylon starts. Changing the local router's
+`tcp_obfuscation` value requires a restart.
 
 `no_net_configure: true` does not disable this attachment. An enabled router
 still installs TCX programs on every named bind interface.
@@ -147,8 +130,10 @@ the on-wire TCP and UDP headers.
 ## How it works
 
 Nylon opens a separate UDP carrier socket for each available address family.
-Each data carrier stores a small connection header followed by one complete
-WireGuard datagram; handshake carriers contain only connection state.
+Each data carrier stores a small connection header followed by one or more
+framed WireGuard datagrams. Every frame begins with a two-byte big-endian length
+equal to the WireGuard datagram length, excluding the two-byte field itself.
+Handshake carriers contain only connection state.
 
 The outer SYN, ACK, FIN, and RST control packets are not WireGuard-authenticated.
 They carry no mesh payload, and a candidate still requires an authenticated
@@ -161,13 +146,20 @@ directions:
    replaces its UDP header with a TCP-shaped header.
 2. Ingress recognizes the corresponding TCP-shaped packets on the configured
    destination port and restores the internal UDP carrier before socket
-   delivery.
+   delivery. If Linux has aggregated consecutive carrier payloads, TCX emits
+   one aggregate UDP carrier and userspace splits its length-delimited frames
+   back into individual WireGuard datagrams.
 3. Traffic outside the managed carrier and port path is left unchanged.
    Packets recognized as managed carrier traffic but failing carrier validation
    are dropped.
 
 The transformer handles ordinary IPv4 and IPv6 packets. Fragmented packets,
 IPv4 options, and IPv6 extension-header paths are not carrier formats.
+
+Keep `rx-gro-list` disabled on named bind interfaces. Unlike LRO and hardware
+GRO, this optional software mode creates frag-list aggregates that a normal UDP
+socket cannot receive intact after TCX restores the UDP carrier. Linux leaves
+`rx-gro-list` disabled by default.
 
 The Linux TCP stack does not own this connection. Nylon maintains the minimal
 sequence state needed for a SYN/SYN-ACK/ACK handshake, TCP-shaped data packets,
@@ -201,10 +193,11 @@ Nylon watches every interface that has attached TCX programs. Removing,
 renaming, or recreating one of those interfaces terminates the running process
 instead of continuing with an incomplete transformation path.
 
-The TCP-shaped header adds 12 bytes over the normal UDP header. The default
-Nylon interface MTU is therefore 1408 for all transports, rather than changing
-conditionally when TCP obfuscation is enabled. A configured custom MTU is not
-adjusted automatically.
+The TCP-shaped header adds 12 bytes over the normal UDP header, and each
+WireGuard datagram has a two-byte length prefix. The total carrier overhead is
+therefore 14 bytes, and the default Nylon interface MTU is 1406 for all
+transports. Interface LRO and hardware GRO do not need to be disabled. A
+configured custom MTU is not adjusted automatically.
 
 ## Observability
 
@@ -227,7 +220,7 @@ managed interfaces and port.
 | --- | --- |
 | `tcp_obfuscation requires linux on amd64 or arm64` | Run Nylon on a supported Linux architecture. |
 | `tcp_obfuscation requires at least one bind with an interface` | Add `binds: [{interface: ...}]` to that router's `node.yaml`. |
-| `fake TCP requires rx-lro off` or `rx-gro-hw off` | Disable the named feature on the interface and restart Nylon. |
+| Fake-TCP data stops after enabling `rx-gro-list` | Disable `rx-gro-list` on every named bind interface; LRO and hardware GRO may remain enabled. |
 | TCX or eBPF attachment fails | Confirm Linux is at least 6.6 and Nylon has permission to load and attach the programs. |
 | No `fake-tcp` candidate appears | Confirm both router entries enable the capability and the local candidate uses a named-interface bind. |
 | The `fake-tcp` candidate stays inactive | Check that TCP reaches the published port in both directions and that both Nylon processes are running. |

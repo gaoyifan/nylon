@@ -5,12 +5,12 @@ package faketcp
 const (
 	CarrierMagic      uint16 = 0x4e59
 	CarrierHeaderSize        = 12
+	FrameHeaderSize          = 2
 	SYNOptionSize            = 4
 
 	TCPFlagFIN uint8 = 0x01
 	TCPFlagSYN uint8 = 0x02
 	TCPFlagRST uint8 = 0x04
-	TCPFlagPSH uint8 = 0x08
 	TCPFlagACK uint8 = 0x10
 )
 

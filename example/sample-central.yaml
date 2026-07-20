@@ -9,8 +9,7 @@ routers:
   - id: alice
     pubkey: xmfAovAKN4AY5ocK5s+/VsG9I27KrQ13Vzb0HOsLKAs==
     # Enable on both participating routers. Each also needs a named-interface
-    # bind in node.yaml and non-Android Linux 6.6+ on amd64/arm64 with rx-lro and
-    # rx-gro-hw disabled.
+    # bind in node.yaml and non-Android Linux 6.6+ on amd64/arm64.
     # tcp_obfuscation: true
     # numeric_id: 16 # optional: pin this node's numeric id, which doubles as its MPLS exit label.
     #                # must be >= 16 (labels 0-15 are reserved). Nodes without `numeric_id`

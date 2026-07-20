@@ -41,7 +41,9 @@ func TestFakeTCPSocketsAndPrepareRetry(t *testing.T) {
 	}
 	if bind.ipv6 != nil {
 		assertSocketOption(t, bind.ipv6, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+		assertSocketOption(t, bind.ipv6, unix.IPPROTO_UDP, unix.UDP_NO_CHECK6_RX, 1)
 		assertSocketOption(t, bind.fakeIPv6, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+		assertSocketOption(t, bind.fakeIPv6, unix.IPPROTO_UDP, unix.UDP_NO_CHECK6_RX, 1)
 		assertSocketOption(t, bind.fakeIPv6, unix.IPPROTO_UDP, unix.UDP_NO_CHECK6_TX, 1)
 		assertSocketOption(t, bind.fakeIPv6, unix.IPPROTO_UDP, unix.UDP_GRO, 0)
 	}

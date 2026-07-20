@@ -11,7 +11,7 @@ import (
 	"github.com/encodeous/nylon/polyamide/tun"
 )
 
-const DefaultMTU = 1408
+const DefaultMTU = 1406
 
 func (device *Device) RoutineTUNEventReader() {
 	device.Log.Verbosef("Routine: event worker - started")

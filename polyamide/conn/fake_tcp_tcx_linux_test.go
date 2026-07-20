@@ -14,7 +14,7 @@ import (
 	"github.com/encodeous/nylon/polyamide/faketcp"
 )
 
-func TestFakeTCPLoopbackHandshakeAndData(t *testing.T) {
+func TestFakeTCPLoopbackHandshakeAndBatchData(t *testing.T) {
 	if os.Getenv("NYLON_PRIVILEGED_TESTS") != "1" {
 		t.Skip("set NYLON_PRIVILEGED_TESTS=1 to run kernel BPF tests")
 	}
@@ -44,7 +44,12 @@ func TestFakeTCPLoopbackHandshakeAndData(t *testing.T) {
 		}
 	})
 
-	received := make(chan []byte, 1)
+	payloads := [][]byte{
+		[]byte("first!"),
+		[]byte("second"),
+		{0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+	}
+	received := make(chan []byte, len(payloads))
 	receiveErrors := make(chan error, len(receivers))
 	for _, receive := range receivers {
 		go func(receive conn.ReceiveFunc) {
@@ -87,18 +92,21 @@ func TestFakeTCPLoopbackHandshakeAndData(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	payload := []byte("wireguard datagram over fake TCP")
-	if err := bind.Send([][]byte{payload}, endpoint); err != nil {
+	if err := bind.Send(payloads, endpoint); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case got := <-received:
-		if string(got) != string(payload) {
-			t.Fatalf("received %q, want %q", got, payload)
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for i, want := range payloads {
+		select {
+		case got := <-received:
+			if string(got) != string(want) {
+				t.Fatalf("received datagram %d %x, want %x", i, got, want)
+			}
+		case err := <-receiveErrors:
+			t.Fatal(err)
+		case <-timer.C:
+			t.Fatalf("fake TCP datagram %d was not received", i)
 		}
-	case err := <-receiveErrors:
-		t.Fatal(err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("fake TCP data was not received")
 	}
 }

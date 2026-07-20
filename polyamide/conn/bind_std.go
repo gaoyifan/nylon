@@ -7,6 +7,7 @@ package conn
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/encodeous/nylon/perf"
+	"github.com/encodeous/nylon/polyamide/faketcp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
@@ -312,15 +314,85 @@ type batchWriter interface {
 	WriteBatch([]ipv6.Message, int) (int, error)
 }
 
+type fakeTCPPendingPacket struct {
+	data   []byte
+	ep     *StdNetEndpoint
+	framed bool
+}
+
+type fakeTCPPending struct {
+	packets []fakeTCPPendingPacket
+}
+
+func (p *fakeTCPPending) append(data []byte, ep *StdNetEndpoint, framed bool) {
+	pendingEP := *ep
+	pendingEP.src = append([]byte(nil), ep.src...)
+	p.packets = append(p.packets, fakeTCPPendingPacket{
+		data:   append([]byte(nil), data...),
+		ep:     &pendingEP,
+		framed: framed,
+	})
+}
+
+func (p *fakeTCPPending) receive(bufs [][]byte, sizes []int, eps []Endpoint) int {
+	n := 0
+	for n < len(bufs) && len(p.packets) > 0 {
+		packet := &p.packets[0]
+		if packet.framed {
+			length := int(binary.BigEndian.Uint16(packet.data[:faketcp.FrameHeaderSize]))
+			sizes[n] = copy(bufs[n], packet.data[faketcp.FrameHeaderSize:faketcp.FrameHeaderSize+length])
+			packet.data = packet.data[faketcp.FrameHeaderSize+length:]
+		} else {
+			sizes[n] = copy(bufs[n], packet.data)
+			packet.data = nil
+		}
+		eps[n] = packet.ep
+		n++
+		if len(packet.data) == 0 {
+			*packet = fakeTCPPendingPacket{}
+			p.packets = p.packets[1:]
+		} else {
+			pendingEP := *packet.ep
+			pendingEP.src = append([]byte(nil), packet.ep.src...)
+			packet.ep = &pendingEP
+		}
+	}
+	if len(p.packets) == 0 {
+		p.packets = nil
+	}
+	return n
+}
+
 func (s *StdNetBind) receiveIP(
 	br batchReader,
 	conn *net.UDPConn,
 	rxOffload bool,
 	fakeTCPEnabled bool,
+	pending *fakeTCPPending,
 	bufs [][]byte,
 	sizes []int,
 	eps []Endpoint,
 ) (n int, err error) {
+	if fakeTCPEnabled {
+		if len(pending.packets) > 0 {
+			if conn != nil {
+				s.mu.Lock()
+				closed := conn != s.ipv4 && conn != s.ipv6 && conn != s.fakeIPv4 && conn != s.fakeIPv6
+				if closed {
+					pending.packets = nil
+					s.mu.Unlock()
+					return 0, net.ErrClosed
+				}
+			}
+			n := pending.receive(bufs, sizes, eps)
+			if conn != nil {
+				s.mu.Unlock()
+			}
+			perf.RecvBatchSize.Add(float64(n))
+			return n, nil
+		}
+	}
+
 	msgs := s.getMessages()
 	for i := range bufs {
 		(*msgs)[i].Buffers[0] = bufs[i]
@@ -345,7 +417,6 @@ func (s *StdNetBind) receiveIP(
 				return 0, err
 			}
 		}
-		perf.RecvBatchSize.Add(float64(numMsgs))
 	} else {
 		msg := &(*msgs)[0]
 		msg.N, msg.NN, _, msg.Addr, err = conn.ReadMsgUDP(msg.Buffers[0], msg.OOB)
@@ -355,35 +426,113 @@ func (s *StdNetBind) receiveIP(
 		numMsgs = 1
 	}
 	perf.RecvsPerSecond.Add(1)
+	if !fakeTCPEnabled {
+		for i := 0; i < numMsgs; i++ {
+			msg := &(*msgs)[i]
+			sizes[i] = msg.N
+			if msg.N == 0 {
+				continue
+			}
+			addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
+			ep := &StdNetEndpoint{AddrPort: addrPort} // TODO: remove allocation
+			getSrcFromControl(msg.OOB[:msg.NN], ep)
+			eps[i] = ep
+		}
+		perf.RecvBatchSize.Add(float64(numMsgs))
+		return numMsgs, nil
+	}
+
+	var frameCounts [IdealBatchSize]int
+	retained := 0
+	total := 0
 	for i := 0; i < numMsgs; i++ {
 		msg := &(*msgs)[i]
-		sizes[i] = msg.N
-		if sizes[i] == 0 {
+		if msg.N == 0 {
 			continue
 		}
 		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
 		ep := &StdNetEndpoint{AddrPort: addrPort} // TODO: remove allocation
 		getSrcFromControl(msg.OOB[:msg.NN], ep)
-		if fakeTCPEnabled {
-			size, carrier := s.receiveFakeTCP(msg.Buffers[0][:sizes[i]], ep)
-			if carrier {
-				sizes[i] = size
+		outputCount := 1
+		payload, frames, carrier := s.receiveFakeTCP(msg.Buffers[0][:msg.N], ep)
+		if carrier {
+			if frames == 0 {
+				continue
 			}
+			available := len(bufs) - total
+			if available == 0 {
+				pending.append(payload, ep, true)
+				continue
+			}
+			payloadAt := len(payload)
+			if frames > available {
+				payloadAt = 0
+				for range available {
+					length := int(binary.BigEndian.Uint16(payload[payloadAt : payloadAt+faketcp.FrameHeaderSize]))
+					payloadAt += faketcp.FrameHeaderSize + length
+				}
+				pending.append(payload[payloadAt:], ep, true)
+				frames = available
+			}
+			msg.N = copy(bufs[retained], payload[:payloadAt])
+			frameCounts[retained] = frames
+			outputCount = frames
+		} else if total == len(bufs) {
+			pending.append(msg.Buffers[0][:msg.N], ep, false)
+			continue
+		} else if retained != i {
+			msg.N = copy(bufs[retained], msg.Buffers[0][:msg.N])
 		}
-		eps[i] = ep
+		sizes[retained] = msg.N
+		eps[retained] = ep
+		retained++
+		total += outputCount
 	}
-	return numMsgs, nil
+	if total == 0 {
+		sizes[0] = 0
+		perf.RecvBatchSize.Add(1)
+		return 1, nil
+	}
+
+	outputAt := total
+	for i := retained - 1; i >= 0; i-- {
+		frames := frameCounts[i]
+		if frames == 0 {
+			outputAt--
+			if outputAt != i {
+				sizes[outputAt] = copy(bufs[outputAt], bufs[i][:sizes[i]])
+				eps[outputAt] = eps[i]
+			}
+			continue
+		}
+
+		outputAt -= frames
+		framed := bufs[i][:sizes[i]]
+		ep := eps[i]
+		at := 0
+		for j := 0; j < frames; j++ {
+			length := int(binary.BigEndian.Uint16(framed[at : at+faketcp.FrameHeaderSize]))
+			at += faketcp.FrameHeaderSize
+			sizes[outputAt+j] = copy(bufs[outputAt+j], framed[at:at+length])
+			eps[outputAt+j] = ep
+			at += length
+		}
+	}
+	perf.RecvBatchSize.Add(float64(total))
+	return total, nil
 }
 
 func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload, fakeTCPEnabled bool) ReceiveFunc {
+	var pending fakeTCPPending
 	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, fakeTCPEnabled, bufs, sizes, eps)
+		return s.receiveIP(pc, conn, rxOffload, fakeTCPEnabled, &pending, bufs, sizes, eps)
 	}
 }
 
 func (s *StdNetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxOffload, fakeTCPEnabled bool) ReceiveFunc {
+	var pending fakeTCPPending
 	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, fakeTCPEnabled, bufs, sizes, eps)
+		return s.receiveIP(pc, conn, rxOffload, fakeTCPEnabled, &pending, bufs, sizes, eps)
 	}
 }
 

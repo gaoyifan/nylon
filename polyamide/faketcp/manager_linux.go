@@ -3,11 +3,9 @@
 package faketcp
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
-	"runtime"
 	"sync"
 	"unsafe"
 
@@ -15,12 +13,6 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/encodeous/nylon/polyamide/rwcancel"
 	"golang.org/x/sys/unix"
-)
-
-const (
-	ethSSFeatures  = 4
-	ethGStringLen  = 32
-	ethtoolBlockSz = 16
 )
 
 type Manager struct {
@@ -82,10 +74,6 @@ func Attach(port uint16, interfaceNames []string) (*Manager, error) {
 		}
 		if _, exists := manager.interfaceNames[iface.Index]; exists {
 			continue
-		}
-		if err := requireHardwareAggregationOff(iface.Name); err != nil {
-			cleanup()
-			return nil, err
 		}
 		manager.interfaceNames[iface.Index] = iface.Name
 	}
@@ -232,76 +220,6 @@ func requireKernel66() error {
 	}
 	if values[0] < 6 || values[0] == 6 && values[1] < 6 {
 		return ErrUnsupported
-	}
-	return nil
-}
-
-type ifreqData struct {
-	name [unix.IFNAMSIZ]byte
-	data unsafe.Pointer
-	_    [8 + unix.SizeofPtr]byte
-}
-
-func ethtoolIoctl(fd int, interfaceName string, data unsafe.Pointer) error {
-	request := ifreqData{data: data}
-	copy(request.name[:], interfaceName)
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.SIOCETHTOOL,
-		uintptr(unsafe.Pointer(&request)))
-	runtime.KeepAlive(data)
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func requireHardwareAggregationOff(interfaceName string) error {
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		return fmt.Errorf("open ethtool socket for fake TCP interface %q: %w", interfaceName, err)
-	}
-	defer unix.Close(fd)
-
-	setInfo := struct {
-		command uint32
-		_       uint32
-		mask    uint64
-		count   uint32
-	}{command: unix.ETHTOOL_GSSET_INFO, mask: 1 << ethSSFeatures}
-	if err := ethtoolIoctl(fd, interfaceName, unsafe.Pointer(&setInfo)); err != nil {
-		return fmt.Errorf("query features of fake TCP interface %q: %w", interfaceName, err)
-	}
-	if setInfo.mask&(1<<ethSSFeatures) == 0 {
-		return fmt.Errorf("fake TCP interface %q does not expose ethtool features", interfaceName)
-	}
-
-	stringsBuffer := make([]byte, 12+int(setInfo.count)*ethGStringLen)
-	binary.NativeEndian.PutUint32(stringsBuffer[0:4], unix.ETHTOOL_GSTRINGS)
-	binary.NativeEndian.PutUint32(stringsBuffer[4:8], ethSSFeatures)
-	binary.NativeEndian.PutUint32(stringsBuffer[8:12], setInfo.count)
-	if err := ethtoolIoctl(fd, interfaceName, unsafe.Pointer(&stringsBuffer[0])); err != nil {
-		return fmt.Errorf("read features of fake TCP interface %q: %w", interfaceName, err)
-	}
-
-	blockCount := (int(setInfo.count) + 31) / 32
-	featuresBuffer := make([]byte, 8+blockCount*ethtoolBlockSz)
-	binary.NativeEndian.PutUint32(featuresBuffer[0:4], unix.ETHTOOL_GFEATURES)
-	binary.NativeEndian.PutUint32(featuresBuffer[4:8], uint32(blockCount))
-	if err := ethtoolIoctl(fd, interfaceName, unsafe.Pointer(&featuresBuffer[0])); err != nil {
-		return fmt.Errorf("read feature state of fake TCP interface %q: %w", interfaceName, err)
-	}
-
-	for index := 0; index < int(setInfo.count); index++ {
-		nameBytes := stringsBuffer[12+index*ethGStringLen : 12+(index+1)*ethGStringLen]
-		name := unix.ByteSliceToString(nameBytes)
-		if name != "rx-lro" && name != "rx-gro-hw" {
-			continue
-		}
-		block := index / 32
-		bit := uint(index % 32)
-		active := binary.NativeEndian.Uint32(featuresBuffer[8+block*ethtoolBlockSz+8:])
-		if active&(1<<bit) != 0 {
-			return fmt.Errorf("fake TCP requires %s off on interface %q", name, interfaceName)
-		}
 	}
 	return nil
 }

@@ -53,23 +53,23 @@ func TestTransformerPrograms(t *testing.T) {
 		{
 			name:    "IPv4 data",
 			version: 4,
-			flags:   TCPFlagACK | TCPFlagPSH,
+			flags:   TCPFlagACK,
 			ack:     0x50607080,
-			trailer: []byte{0xde, 0xad, 0xbe, 0xef, 0x7a},
+			trailer: testFakeTCPFrame([]byte{0xde, 0xad, 0xbe, 0xef, 0x7a}),
 		},
 		{
 			name:    "IPv6 data",
 			version: 6,
-			flags:   TCPFlagACK | TCPFlagPSH,
+			flags:   TCPFlagACK,
 			ack:     0x50607080,
-			trailer: []byte{0xde, 0xad, 0xbe, 0xef, 0x7a},
+			trailer: testFakeTCPFrame([]byte{0xde, 0xad, 0xbe, 0xef, 0x7a}),
 		},
 		{
-			name:    "four-byte zero-sum data",
+			name:    "four-byte framed data",
 			version: 4,
-			flags:   TCPFlagACK | TCPFlagPSH,
+			flags:   TCPFlagACK,
 			ack:     0x50607080,
-			trailer: []byte{0, 0, 0, 0},
+			trailer: testFakeTCPFrame([]byte{0, 0}),
 		},
 		{
 			name:    "IPv4 SYN",
@@ -122,9 +122,47 @@ func TestTransformerPrograms(t *testing.T) {
 		})
 	}
 
+	t.Run("aggregated TCP carrier", func(t *testing.T) {
+		const sequence = 0x10203040
+		first := testFakeTCPFrame([]byte{0xde, 0xad, 0xbe, 0xef, 0x7a})
+		second := testFakeTCPFrame([]byte{1, 2, 3})
+		framed := append(append([]byte(nil), first...), second...)
+		carrier := testCarrierFrame(4, testManagedPort, sequence, 0x50607080,
+			TCPFlagACK, framed)
+		_, tcpPacket, err := objects.FakeTcpEgress.Test(carrier)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tcpPacket = reverseTCPDirection(t, tcpPacket, 4)
+
+		const (
+			skbContextSize = 192
+			gsoSegsOffset  = 164
+			gsoSizeOffset  = 176
+		)
+		context := make([]byte, skbContextSize)
+		binary.NativeEndian.PutUint32(context[gsoSegsOffset:], 2)
+		binary.NativeEndian.PutUint32(context[gsoSizeOffset:], uint32(len(first)))
+		run := &ebpf.RunOptions{
+			Data:    tcpPacket,
+			DataOut: make([]byte, len(tcpPacket)+258),
+			Context: context,
+			Repeat:  1,
+		}
+		action, err := objects.FakeTcpIngress.Run(run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if action != tcxNext {
+			t.Fatalf("ingress action = %d, want TCX_NEXT", action)
+		}
+		assertInboundUDPCarrier(t, run.DataOut, 4, sequence, 0x50607080,
+			TCPFlagACK, framed)
+	})
+
 	t.Run("ordinary UDP with magic", func(t *testing.T) {
 		packet := testCarrierFrame(4, testManagedPort, 0x10203040, 0x50607080,
-			TCPFlagACK|TCPFlagPSH, []byte{0xde, 0xad, 0xbe, 0xef})
+			TCPFlagACK, testFakeTCPFrame([]byte{0xde, 0xad, 0xbe, 0xef}))
 		l4Offset := 14 + 20
 		checksum := transportChecksum(packet)
 		if checksum == 0 {
@@ -147,7 +185,7 @@ func TestTransformerPrograms(t *testing.T) {
 
 	t.Run("carrier from wrong source port", func(t *testing.T) {
 		packet := testCarrierFrame(4, testManagedPort+1, 0x10203040, 0x50607080,
-			TCPFlagACK|TCPFlagPSH, []byte{0xde, 0xad, 0xbe, 0xef})
+			TCPFlagACK, testFakeTCPFrame([]byte{0xde, 0xad, 0xbe, 0xef}))
 		original := bytes.Clone(packet)
 		action, output, err := objects.FakeTcpEgress.Test(packet)
 		if err != nil {
@@ -181,6 +219,13 @@ func requirePrivilegedTests(t *testing.T) {
 	if os.Getenv("NYLON_PRIVILEGED_TESTS") != "1" {
 		t.Skip("set NYLON_PRIVILEGED_TESTS=1 to run kernel BPF tests")
 	}
+}
+
+func testFakeTCPFrame(payload []byte) []byte {
+	frame := make([]byte, FrameHeaderSize+len(payload))
+	binary.BigEndian.PutUint16(frame, uint16(len(payload)))
+	copy(frame[FrameHeaderSize:], payload)
+	return frame
 }
 
 func testCarrierFrame(version int, sourcePort uint16, sequence, acknowledgement uint32, flags uint8, trailer []byte) []byte {
@@ -218,7 +263,7 @@ func testCarrierFrame(version int, sourcePort uint16, sequence, acknowledgement 
 	binary.BigEndian.PutUint16(packet[l4Offset+2:l4Offset+4], testRemotePort)
 	binary.BigEndian.PutUint16(packet[l4Offset+4:l4Offset+6], uint16(l4Length))
 	binary.BigEndian.PutUint16(packet[l4Offset+8:l4Offset+10], CarrierMagic)
-	if flags == TCPFlagACK|TCPFlagPSH {
+	if flags&TCPFlagSYN == 0 && len(trailer) > 0 {
 		binary.BigEndian.PutUint16(packet[l4Offset+10:l4Offset+12], FoldPayloadChecksum(trailer))
 	} else {
 		binary.BigEndian.PutUint16(packet[l4Offset+10:l4Offset+12], uint16(flags))
@@ -287,8 +332,8 @@ func assertInboundUDPCarrier(t *testing.T, packet []byte, version int, sequence,
 	if got, want := binary.BigEndian.Uint16(packet[l4Offset+4:l4Offset+6]), len(packet)-l4Offset; int(got) != want {
 		t.Fatalf("UDP length = %d, want %d", got, want)
 	}
-	if got := binary.BigEndian.Uint16(packet[l4Offset+6 : l4Offset+8]); got == 0 {
-		t.Fatal("UDP checksum is zero")
+	if got := binary.BigEndian.Uint16(packet[l4Offset+6 : l4Offset+8]); got != 0 {
+		t.Fatalf("UDP checksum = %#x, want 0", got)
 	}
 	if got := binary.BigEndian.Uint16(packet[l4Offset+8 : l4Offset+10]); got != CarrierMagic {
 		t.Fatalf("carrier magic = %#x, want %#x", got, CarrierMagic)
@@ -304,9 +349,6 @@ func assertInboundUDPCarrier(t *testing.T, packet []byte, version int, sequence,
 	}
 	if !bytes.Equal(packet[l4Offset+20:], trailer) {
 		t.Fatalf("carrier trailer = %x, want %x", packet[l4Offset+20:], trailer)
-	}
-	if got := transportChecksum(packet); got != 0 {
-		t.Fatalf("UDP checksum verification = %#x, want 0", got)
 	}
 	assertIPv4Checksum(t, packet, version)
 }

@@ -26,7 +26,7 @@ func main() {
 	tun, tnet, err := netstack.CreateNetTUN(
 		[]netip.Addr{netip.MustParseAddr("192.168.4.29")},
 		[]netip.Addr{netip.MustParseAddr("8.8.8.8")},
-		1408)
+		1406)
 	if err != nil {
 		log.Panic(err)
 	}
