@@ -17,6 +17,9 @@ const (
 	testRemotePort  = 443
 	tcxNext         = ^uint32(0)
 	tcxDrop         = 2
+	testSKBSize     = 192
+	testGSOSegsAt   = 164
+	testGSOSizeAt   = 176
 )
 
 func TestTransformerPrograms(t *testing.T) {
@@ -135,14 +138,9 @@ func TestTransformerPrograms(t *testing.T) {
 		}
 		tcpPacket = reverseTCPDirection(t, tcpPacket, 4)
 
-		const (
-			skbContextSize = 192
-			gsoSegsOffset  = 164
-			gsoSizeOffset  = 176
-		)
-		context := make([]byte, skbContextSize)
-		binary.NativeEndian.PutUint32(context[gsoSegsOffset:], 2)
-		binary.NativeEndian.PutUint32(context[gsoSizeOffset:], uint32(len(first)))
+		context := make([]byte, testSKBSize)
+		binary.NativeEndian.PutUint32(context[testGSOSegsAt:], 2)
+		binary.NativeEndian.PutUint32(context[testGSOSizeAt:], uint32(len(first)))
 		run := &ebpf.RunOptions{
 			Data:    tcpPacket,
 			DataOut: make([]byte, len(tcpPacket)+258),
@@ -158,6 +156,71 @@ func TestTransformerPrograms(t *testing.T) {
 		}
 		assertInboundUDPCarrier(t, run.DataOut, 4, sequence, 0x50607080,
 			TCPFlagACK, framed, true)
+	})
+
+	t.Run("layer 3 carrier", func(t *testing.T) {
+		for _, version := range []int{4, 6} {
+			name := "IPv4"
+			if version == 6 {
+				name = "IPv6"
+			}
+			t.Run(name, func(t *testing.T) {
+				const sequence = 0x10203040
+				trailer := testFakeTCPFrame([]byte{0xde, 0xad, 0xbe, 0xef})
+				carrier := testCarrierFrame(version, testManagedPort, sequence,
+					0x50607080, TCPFlagACK, trailer)
+				run := &ebpf.RunOptions{
+					Data:    carrier[14:],
+					DataOut: make([]byte, len(carrier)+258),
+					Context: make([]byte, testSKBSize),
+					Repeat:  1,
+				}
+				action, err := objects.FakeTcpEgressL3.Run(run)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if action != tcxNext {
+					t.Fatalf("egress action = %d, want TCX_NEXT", action)
+				}
+				tcpPacket := addTestEthernet(run.DataOut, version)
+				assertTCPPacket(t, tcpPacket, version, sequence, 0x50607080,
+					TCPFlagACK, trailer)
+				tcpPacket = reverseTCPDirection(t, tcpPacket, version)
+
+				run.Data = tcpPacket[14:]
+				run.DataOut = make([]byte, len(tcpPacket)+258)
+				action, err = objects.FakeTcpIngressL3.Run(run)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if action != tcxNext {
+					t.Fatalf("ingress action = %d, want TCX_NEXT", action)
+				}
+				assertInboundUDPCarrier(t, addTestEthernet(run.DataOut, version),
+					version, sequence, 0x50607080, TCPFlagACK, trailer, false)
+			})
+		}
+	})
+
+	t.Run("SYN with NAT MSS option", func(t *testing.T) {
+		const sequence = 0x10203040
+		carrier := testCarrierFrame(4, testManagedPort, sequence, 0,
+			TCPFlagSYN, []byte{1, 3, 3, 14})
+		_, tcpPacket, err := objects.FakeTcpEgress.Test(carrier)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tcpPacket = addTestMSSOption(t, reverseTCPDirection(t, tcpPacket, 4))
+
+		action, udpPacket, err := objects.FakeTcpIngress.Test(tcpPacket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if action != tcxNext {
+			t.Fatalf("ingress action = %d, want TCX_NEXT", action)
+		}
+		assertInboundUDPCarrier(t, udpPacket, 4, sequence, 0, TCPFlagSYN,
+			[]byte{2, 4, 2, 24, 1, 3, 3, 14}, false)
 	})
 
 	t.Run("corrupted TCP carrier", func(t *testing.T) {
@@ -302,6 +365,41 @@ func testCarrierFrame(version int, sourcePort uint16, sequence, acknowledgement 
 	binary.BigEndian.PutUint32(packet[l4Offset+16:l4Offset+20], acknowledgement)
 	copy(packet[l4Offset+20:], trailer)
 	return packet
+}
+
+func addTestEthernet(packet []byte, version int) []byte {
+	ethernet := make([]byte, 14, 14+len(packet))
+	copy(ethernet[0:6], []byte{0x02, 0, 0, 0, 0, 2})
+	copy(ethernet[6:12], []byte{0x02, 0, 0, 0, 0, 1})
+	etherType := uint16(0x0800)
+	if version == 6 {
+		etherType = 0x86dd
+	}
+	binary.BigEndian.PutUint16(ethernet[12:14], etherType)
+	return append(ethernet, packet...)
+}
+
+func addTestMSSOption(t *testing.T, packet []byte) []byte {
+	t.Helper()
+	l4Offset, protocol := testL4OffsetAndProtocol(t, packet, 4)
+	if protocol != 6 || packet[l4Offset+12] != 0x60 {
+		t.Fatal("test packet is not a TCP SYN with one option word")
+	}
+	withMSS := make([]byte, len(packet)+4)
+	copy(withMSS, packet[:l4Offset+20])
+	copy(withMSS[l4Offset+20:], []byte{2, 4, 2, 24})
+	copy(withMSS[l4Offset+24:], packet[l4Offset+20:])
+	withMSS[l4Offset+12] = 0x70
+	binary.BigEndian.PutUint16(withMSS[16:18], binary.BigEndian.Uint16(withMSS[16:18])+4)
+	withMSS[24], withMSS[25] = 0, 0
+	binary.BigEndian.PutUint16(withMSS[24:26], internetChecksum(withMSS[14:34]))
+	withMSS[l4Offset+16], withMSS[l4Offset+17] = 0, 0
+	checksum := transportChecksum(withMSS)
+	if checksum == 0 {
+		checksum = 0xffff
+	}
+	binary.BigEndian.PutUint16(withMSS[l4Offset+16:l4Offset+18], checksum)
+	return withMSS
 }
 
 func assertTCPPacket(t *testing.T, packet []byte, version int, sequence, acknowledgement uint32, flags uint8, trailer []byte) {

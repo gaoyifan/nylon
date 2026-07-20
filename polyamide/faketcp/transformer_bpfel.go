@@ -54,8 +54,10 @@ type transformerSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type transformerProgramSpecs struct {
-	FakeTcpEgress  *ebpf.ProgramSpec `ebpf:"fake_tcp_egress"`
-	FakeTcpIngress *ebpf.ProgramSpec `ebpf:"fake_tcp_ingress"`
+	FakeTcpEgress    *ebpf.ProgramSpec `ebpf:"fake_tcp_egress"`
+	FakeTcpEgressL3  *ebpf.ProgramSpec `ebpf:"fake_tcp_egress_l3"`
+	FakeTcpIngress   *ebpf.ProgramSpec `ebpf:"fake_tcp_ingress"`
+	FakeTcpIngressL3 *ebpf.ProgramSpec `ebpf:"fake_tcp_ingress_l3"`
 }
 
 // transformerMapSpecs contains maps before they are loaded into the kernel.
@@ -108,14 +110,18 @@ type transformerVariables struct {
 //
 // It can be passed to loadTransformerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type transformerPrograms struct {
-	FakeTcpEgress  *ebpf.Program `ebpf:"fake_tcp_egress"`
-	FakeTcpIngress *ebpf.Program `ebpf:"fake_tcp_ingress"`
+	FakeTcpEgress    *ebpf.Program `ebpf:"fake_tcp_egress"`
+	FakeTcpEgressL3  *ebpf.Program `ebpf:"fake_tcp_egress_l3"`
+	FakeTcpIngress   *ebpf.Program `ebpf:"fake_tcp_ingress"`
+	FakeTcpIngressL3 *ebpf.Program `ebpf:"fake_tcp_ingress_l3"`
 }
 
 func (p *transformerPrograms) Close() error {
 	return _TransformerClose(
 		p.FakeTcpEgress,
+		p.FakeTcpEgressL3,
 		p.FakeTcpIngress,
+		p.FakeTcpIngressL3,
 	)
 }
 

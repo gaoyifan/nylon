@@ -83,6 +83,9 @@ and LAN-discovered endpoints remain UDP-only. See
 [Endpoint Local Binds](/reference/endpoint-local-binds) for bind matching and
 source-address behaviour.
 
+Named binds may use an Ethernet interface or a point-to-point L3 interface such
+as PPP.
+
 Once the carrier is established, a WireGuard-authenticated probe can teach the
 receiving router a reverse `fake-tcp` candidate. The two routers therefore do
 not both need published endpoints.
@@ -130,7 +133,8 @@ upstream TCP 57175 -> Nylon node port 57175
 An external router may translate both protocols from another shared public
 port to the node's configured port. For example, `alice.example.com:443` may
 map both UDP 443 and TCP 443 to port 57175 on Alice. Configure the central
-endpoint as `alice.example.com:443`.
+endpoint as `alice.example.com:443`. Nylon also accepts an MSS option prepended
+to a carrier SYN by a NAT or firewall.
 
 Port translation on the Nylon host itself is not supported because TCX matches
 the configured local port before host NAT can rewrite it. TCP reverse proxies,
@@ -202,8 +206,9 @@ directions:
    Packets recognized as managed carrier traffic but failing carrier validation
    are dropped.
 
-The transformer handles ordinary IPv4 and IPv6 packets. Fragmented packets,
-IPv4 options, and IPv6 extension-header paths are not carrier formats.
+The transformer handles ordinary IPv4 and IPv6 packets on Ethernet and
+point-to-point L3 interfaces. Fragmented packets, IPv4 options, and IPv6
+extension-header paths are not carrier formats.
 
 The Linux TCP stack does not own this connection. Nylon maintains the minimal
 sequence state needed for a SYN/SYN-ACK/ACK handshake, TCP-shaped data packets,

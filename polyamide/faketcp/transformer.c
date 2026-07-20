@@ -131,6 +131,7 @@ struct tcp_header {
 } __attribute__((packed));
 
 struct packet_info {
+	__u16 l3_offset;
 	__u16 l4_offset;
 	__u16 l4_length;
 	__u8 version;
@@ -173,23 +174,47 @@ static __always_inline __be16 finish_checksum(__u32 sum)
 }
 
 static __always_inline int parse_packet(struct __sk_buff *skb,
-					void *data, void *data_end,
-					struct packet_info *info)
+					struct packet_info *info, __u16 l3_offset)
 {
-	struct eth_header *ethernet = data;
-	if ((void *)(ethernet + 1) > data_end)
+	__u16 header_length = l3_offset + sizeof(struct ipv6_header);
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	if (data + header_length > data_end) {
+		if (bpf_skb_pull_data(skb, header_length) < 0)
+			return 0;
+		data = (void *)(long)skb->data;
+		data_end = (void *)(long)skb->data_end;
+	}
+	if (data + header_length > data_end)
 		return 0;
 
-	if (ethernet->protocol == bpf_htons(ETH_P_IP)) {
-		struct ipv4_header *ip = data + sizeof(*ethernet);
+	__u8 version;
+	if (l3_offset == sizeof(struct eth_header)) {
+		struct eth_header *ethernet = data;
+		if (ethernet->protocol == bpf_htons(ETH_P_IP)) {
+			version = 4;
+		} else if (ethernet->protocol == bpf_htons(ETH_P_IPV6)) {
+			version = 6;
+		} else {
+			return 0;
+		}
+	} else {
+		version = *(__u8 *)data >> 4;
+		if (version != 4 && version != 6)
+			return 0;
+	}
+
+	if (version == 4) {
+		struct ipv4_header *ip = data + l3_offset;
 		if ((void *)(ip + 1) > data_end || ip->version_ihl >> 4 != 4)
 			return 0;
 		__u8 ihl = (ip->version_ihl & 0xf) * 4;
 		__u16 total_length = bpf_ntohs(ip->total_length);
 		if (ihl < sizeof(*ip) || total_length < ihl ||
-		    sizeof(*ethernet) + total_length > skb->len)
+		    l3_offset + total_length > skb->len)
 			return 0;
-		info->l4_offset = sizeof(*ethernet) + ihl;
+		info->l3_offset = l3_offset;
+		info->l4_offset = l3_offset + ihl;
 		info->l4_length = total_length - ihl;
 		info->version = 4;
 		info->protocol = ip->protocol;
@@ -198,15 +223,16 @@ static __always_inline int parse_packet(struct __sk_buff *skb,
 		return 1;
 	}
 
-	if (ethernet->protocol == bpf_htons(ETH_P_IPV6)) {
-		struct ipv6_header *ip = data + sizeof(*ethernet);
+	if (version == 6) {
+		struct ipv6_header *ip = data + l3_offset;
 		if ((void *)(ip + 1) > data_end ||
 		    bpf_ntohl(ip->version_flow) >> 28 != 6)
 			return 0;
 		__u16 payload_length = bpf_ntohs(ip->payload_length);
-		if (sizeof(*ethernet) + sizeof(*ip) + payload_length > skb->len)
+		if (l3_offset + sizeof(*ip) + payload_length > skb->len)
 			return 0;
-		info->l4_offset = sizeof(*ethernet) + sizeof(*ip);
+		info->l3_offset = l3_offset;
+		info->l4_offset = l3_offset + sizeof(*ip);
 		info->l4_length = payload_length;
 		info->version = 6;
 		info->protocol = ip->next_header;
@@ -276,11 +302,11 @@ static __always_inline __be16 tcp_checksum(void *data,
 {
 	__u32 sum = payload_sum + IPPROTO_TCP + info->l4_length;
 	if (info->version == 4) {
-		struct ipv4_header *ip = data + sizeof(struct eth_header);
+		struct ipv4_header *ip = data + info->l3_offset;
 		sum = add_be32(sum, ip->source);
 		sum = add_be32(sum, ip->destination);
 	} else {
-		struct ipv6_header *ip = data + sizeof(struct eth_header);
+		struct ipv6_header *ip = data + info->l3_offset;
 #pragma unroll
 		for (int i = 0; i < 16; i += 2) {
 			sum += ((__u32)ip->source[i] << 8) + ip->source[i + 1];
@@ -302,49 +328,27 @@ static __always_inline int update_ip_protocol(struct __sk_buff *skb,
 		ipv4->protocol = protocol;
 		ipv4->checksum = 0;
 		ipv4->checksum = ipv4_checksum(ipv4);
-		return bpf_skb_store_bytes(skb, sizeof(struct eth_header), ipv4,
+		return bpf_skb_store_bytes(skb, info->l3_offset, ipv4,
 					   sizeof(*ipv4), BPF_F_RECOMPUTE_CSUM);
 	}
 	return bpf_skb_store_bytes(skb,
-				   sizeof(struct eth_header) + 6,
+				   info->l3_offset + 6,
 				   &protocol, sizeof(protocol), BPF_F_RECOMPUTE_CSUM);
 }
 
-SEC("tcx/egress")
-int fake_tcp_egress(struct __sk_buff *skb)
+static __always_inline int transform_egress(struct __sk_buff *skb,
+					     __u16 l3_offset)
 {
-	void *data = (void *)(long)skb->data;
-	void *data_end = (void *)(long)skb->data_end;
-	struct eth_header *ethernet = data;
-	if ((void *)(ethernet + 1) > data_end)
-		return TCX_NEXT;
-	if (ethernet->protocol == bpf_htons(ETH_P_IP)) {
-		if (data + sizeof(*ethernet) + sizeof(struct ipv4_header) > data_end) {
-			if (bpf_skb_pull_data(skb, sizeof(*ethernet) +
-					       sizeof(struct ipv4_header)) < 0)
-				return TCX_NEXT;
-			data = (void *)(long)skb->data;
-			data_end = (void *)(long)skb->data_end;
-		}
-	} else if (ethernet->protocol == bpf_htons(ETH_P_IPV6)) {
-		if (data + sizeof(*ethernet) + sizeof(struct ipv6_header) > data_end) {
-			if (bpf_skb_pull_data(skb, sizeof(*ethernet) +
-					       sizeof(struct ipv6_header)) < 0)
-				return TCX_NEXT;
-			data = (void *)(long)skb->data;
-			data_end = (void *)(long)skb->data_end;
-		}
-	} else {
-		return TCX_NEXT;
-	}
 	struct packet_info info = {};
-	if (!parse_packet(skb, data, data_end, &info) || info.protocol != IPPROTO_UDP ||
+	if (!parse_packet(skb, &info, l3_offset) || info.protocol != IPPROTO_UDP ||
 	    info.l4_length < sizeof(struct udp_carrier))
 		return TCX_NEXT;
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
 	__u32 pull_length = info.l4_offset + sizeof(struct tcp_header);
 	if (info.l4_length >= sizeof(struct tcp_header) + 4)
 		pull_length += 4;
-	if (pull_length > sizeof(struct eth_header) + 60 +
+	if (pull_length > info.l3_offset + 60 +
 			  sizeof(struct tcp_header) + 4)
 		return TCX_NEXT;
 	if (data + pull_length > data_end) {
@@ -399,8 +403,12 @@ int fake_tcp_egress(struct __sk_buff *skb)
 	}
 
 	struct ipv4_header ipv4 = {};
-	if (info.version == 4)
-		ipv4 = *(struct ipv4_header *)(data + sizeof(struct eth_header));
+	if (info.version == 4) {
+		struct ipv4_header *ip = data + info.l3_offset;
+		if ((void *)(ip + 1) > data_end)
+			return TCX_DROP;
+		ipv4 = *ip;
+	}
 	tcp.checksum = tcp_checksum(data, &info, &tcp, payload_sum,
 				    option_one, option_two);
 	if (bpf_skb_store_bytes(skb, info.l4_offset, &tcp, sizeof(tcp),
@@ -411,43 +419,28 @@ int fake_tcp_egress(struct __sk_buff *skb)
 	return TCX_NEXT;
 }
 
-SEC("tcx/ingress")
-int fake_tcp_ingress(struct __sk_buff *skb)
+SEC("tcx/egress")
+int fake_tcp_egress(struct __sk_buff *skb)
 {
-	void *data = (void *)(long)skb->data;
-	void *data_end = (void *)(long)skb->data_end;
-	struct eth_header *ethernet = data;
-	if ((void *)(ethernet + 1) > data_end)
-		return TCX_NEXT;
-	if (ethernet->protocol == bpf_htons(ETH_P_IP)) {
-		if (data + sizeof(*ethernet) + sizeof(struct ipv4_header) > data_end) {
-			if (bpf_skb_pull_data(skb, sizeof(*ethernet) +
-					       sizeof(struct ipv4_header)) < 0)
-				return TCX_NEXT;
-			data = (void *)(long)skb->data;
-			data_end = (void *)(long)skb->data_end;
-		}
-	} else if (ethernet->protocol == bpf_htons(ETH_P_IPV6)) {
-		if (data + sizeof(*ethernet) + sizeof(struct ipv6_header) > data_end) {
-			if (bpf_skb_pull_data(skb, sizeof(*ethernet) +
-					       sizeof(struct ipv6_header)) < 0)
-				return TCX_NEXT;
-			data = (void *)(long)skb->data;
-			data_end = (void *)(long)skb->data_end;
-		}
-	} else {
-		return TCX_NEXT;
-	}
+	return transform_egress(skb, sizeof(struct eth_header));
+}
+
+SEC("tcx/egress")
+int fake_tcp_egress_l3(struct __sk_buff *skb)
+{
+	return transform_egress(skb, 0);
+}
+
+static __always_inline int transform_ingress(struct __sk_buff *skb,
+					      __u16 l3_offset)
+{
 	struct packet_info info = {};
-	if (!parse_packet(skb, data, data_end, &info) || info.protocol != IPPROTO_TCP ||
+	if (!parse_packet(skb, &info, l3_offset) || info.protocol != IPPROTO_TCP ||
 	    info.l4_length < sizeof(struct tcp_header))
 		return TCX_NEXT;
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
 	__u32 pull_length = info.l4_offset + sizeof(struct tcp_header);
-	if (info.l4_length >= sizeof(struct tcp_header) + 4)
-		pull_length += 4;
-	if (pull_length > sizeof(struct eth_header) + 60 +
-			  sizeof(struct tcp_header) + 4)
-		return TCX_NEXT;
 	if (data + pull_length > data_end) {
 		if (bpf_skb_pull_data(skb, pull_length) < 0)
 			return TCX_NEXT;
@@ -465,15 +458,30 @@ int fake_tcp_ingress(struct __sk_buff *skb)
 	struct tcp_header tcp = *wire_tcp;
 	__u32 header_length = tcp.data_offset >> 4;
 	header_length *= 4;
-	if ((tcp.data_offset & 0xf) != 0)
+	if ((tcp.data_offset & 0xf) != 0 || header_length < sizeof(tcp) ||
+	    header_length > 60 || header_length > info.l4_length)
 		return TCX_DROP;
+	pull_length = info.l4_offset + header_length;
+	if (data + pull_length > data_end) {
+		if (bpf_skb_pull_data(skb, pull_length) < 0)
+			return TCX_DROP;
+		data = (void *)(long)skb->data;
+		data_end = (void *)(long)skb->data_end;
+		if (data + pull_length > data_end)
+			return TCX_DROP;
+	}
 
 	if (tcp.flags == TCP_FLAG_SYN ||
 	    tcp.flags == (TCP_FLAG_SYN | TCP_FLAG_ACK)) {
 		__u8 *option = data + info.l4_offset + sizeof(tcp);
-		if (header_length != sizeof(tcp) + 4 ||
-		    info.l4_length != header_length || option + 4 > (__u8 *)data_end ||
-		    option[0] != 1 || option[1] != 3 || option[2] != 3 || option[3] != 14)
+		int canonical = header_length == sizeof(tcp) + 4 &&
+			option + 4 <= (__u8 *)data_end && option[0] == 1 &&
+			option[1] == 3 && option[2] == 3 && option[3] == 14;
+		int with_mss = header_length == sizeof(tcp) + 8 &&
+			option + 8 <= (__u8 *)data_end && option[0] == 2 &&
+			option[1] == 4 && option[4] == 1 && option[5] == 3 &&
+			option[6] == 3 && option[7] == 14;
+		if (info.l4_length != header_length || (!canonical && !with_mss))
 			return TCX_DROP;
 	} else {
 		if (header_length != sizeof(tcp))
@@ -507,8 +515,12 @@ int fake_tcp_ingress(struct __sk_buff *skb)
 		carrier.checksum = finish_checksum(sum);
 	}
 	struct ipv4_header ipv4 = {};
-	if (info.version == 4)
-		ipv4 = *(struct ipv4_header *)(data + sizeof(struct eth_header));
+	if (info.version == 4) {
+		struct ipv4_header *ip = data + info.l3_offset;
+		if ((void *)(ip + 1) > data_end)
+			return TCX_DROP;
+		ipv4 = *ip;
+	}
 	if (bpf_skb_store_bytes(skb, info.l4_offset, &carrier, sizeof(carrier),
 				BPF_F_RECOMPUTE_CSUM) < 0)
 		return TCX_DROP;
@@ -517,6 +529,18 @@ int fake_tcp_ingress(struct __sk_buff *skb)
 	if (bpf_csum_level(skb, BPF_CSUM_LEVEL_RESET) < 0)
 		return TCX_DROP;
 	return TCX_NEXT;
+}
+
+SEC("tcx/ingress")
+int fake_tcp_ingress(struct __sk_buff *skb)
+{
+	return transform_ingress(skb, sizeof(struct eth_header));
+}
+
+SEC("tcx/ingress")
+int fake_tcp_ingress_l3(struct __sk_buff *skb)
+{
+	return transform_ingress(skb, 0);
 }
 
 char __license[] SEC("license") = "Apache-2.0";

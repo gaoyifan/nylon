@@ -19,13 +19,14 @@ type Manager struct {
 	objects transformerObjects
 	links   []link.Link
 
-	interfaceNames map[int]string
-	netlinkFD      int
-	netlinkCancel  *rwcancel.RWCancel
-	errors         chan error
-	watcher        sync.WaitGroup
-	closeOnce      sync.Once
-	closeErr       error
+	interfaceNames   map[int]string
+	layer3Interfaces map[int]bool
+	netlinkFD        int
+	netlinkCancel    *rwcancel.RWCancel
+	errors           chan error
+	watcher          sync.WaitGroup
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 func Attach(port uint16, interfaceNames []string) (*Manager, error) {
@@ -52,10 +53,11 @@ func Attach(port uint16, interfaceNames []string) (*Manager, error) {
 	}
 
 	manager := &Manager{
-		interfaceNames: make(map[int]string),
-		netlinkFD:      netlinkFD,
-		netlinkCancel:  netlinkCancel,
-		errors:         make(chan error, 1),
+		interfaceNames:   make(map[int]string),
+		layer3Interfaces: make(map[int]bool),
+		netlinkFD:        netlinkFD,
+		netlinkCancel:    netlinkCancel,
+		errors:           make(chan error, 1),
 	}
 	cleanup := func() {
 		for i := len(manager.links) - 1; i >= 0; i-- {
@@ -76,6 +78,7 @@ func Attach(port uint16, interfaceNames []string) (*Manager, error) {
 			continue
 		}
 		manager.interfaceNames[iface.Index] = iface.Name
+		manager.layer3Interfaces[iface.Index] = iface.Flags&net.FlagPointToPoint != 0
 	}
 
 	spec, err := loadTransformer()
@@ -93,9 +96,15 @@ func Attach(port uint16, interfaceNames []string) (*Manager, error) {
 	}
 
 	for index, name := range manager.interfaceNames {
+		egressProgram := manager.objects.FakeTcpEgress
+		ingressProgram := manager.objects.FakeTcpIngress
+		if manager.layer3Interfaces[index] {
+			egressProgram = manager.objects.FakeTcpEgressL3
+			ingressProgram = manager.objects.FakeTcpIngressL3
+		}
 		egress, err := link.AttachTCX(link.TCXOptions{
 			Interface: index,
-			Program:   manager.objects.FakeTcpEgress,
+			Program:   egressProgram,
 			Attach:    ebpf.AttachTCXEgress,
 		})
 		if err != nil {
@@ -106,7 +115,7 @@ func Attach(port uint16, interfaceNames []string) (*Manager, error) {
 
 		ingress, err := link.AttachTCX(link.TCXOptions{
 			Interface: index,
-			Program:   manager.objects.FakeTcpIngress,
+			Program:   ingressProgram,
 			Attach:    ebpf.AttachTCXIngress,
 		})
 		if err != nil {
