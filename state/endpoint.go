@@ -267,6 +267,7 @@ type NylonEndpoint struct {
 	WgEndpoint    conn.Endpoint
 	DynEP         *DynamicEndpoint
 	Bind          LocalBind
+	Transport     conn.Transport
 
 	// LinkId is a process-unique identifier carried in outgoing probes and
 	// echoed back in replies (see protocol.Ny_Probe).
@@ -333,6 +334,20 @@ func (ep *NylonEndpoint) GetWgEndpoint(device *device.Device) (conn.Endpoint, er
 			ifidx = int32(iface.Index)
 		}
 		setter.SetSrc(ep.Bind.Source, ifidx)
+	}
+	if ep.Transport == conn.TransportFakeTCP {
+		wgEndpoint, ok := ep.WgEndpoint.(*conn.StdNetEndpoint)
+		if !ok {
+			return nil, fmt.Errorf("fake TCP requires StdNetEndpoint")
+		}
+		wgEndpoint.SetTransport(conn.TransportFakeTCP)
+		bind, ok := device.Bind().(*conn.StdNetBind)
+		if !ok {
+			return nil, fmt.Errorf("fake TCP requires StdNetBind")
+		}
+		if err := bind.PrepareFakeTCP(wgEndpoint); err != nil {
+			return nil, err
+		}
 	}
 	return ep.WgEndpoint, nil
 }

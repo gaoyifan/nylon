@@ -12,15 +12,15 @@ Each node has its own `node.yaml` with local settings. Generate a keypair with `
 ```yaml title="node.yaml"
 key: 0NcrMcaS1tORCTA88L5ZPE+H6yUMV4e5vRp6iypnPW8= # private key (from `nylon key`)
 id: alice # must match this node's id in central.yaml
-port: 57175 # UDP port nylon listens on
+port: 57175 # required local data port; 57175 is conventional; fake-TCP emits TCP-shaped packets on it
 
 # --- Optional fields below ---
 
 use_system_routing: false # if true, all peer packets exit via the TUN interface
-no_net_configure: false # if true, nylon won't touch system routes or interfaces
+no_net_configure: false # skip normal route/address setup; tcp_obfuscation still attaches TCX
 log_path: "" # write logs to this file (empty = stderr only)
 interface_name: "" # override the interface name (default: "nylon", or utunX on macOS)
-mtu: 0 # interface MTU; 0 = built-in default (1420). Keep it consistent mesh-wide
+mtu: 0 # interface MTU; 0 = built-in default (1408). Keep it consistent mesh-wide
 dns_resolvers: [] # DNS servers for nylon's own lookups, e.g. ["1.1.1.1:53"]
 
 # Exit nodes (a node may be an exit, a client of an exit, both, or neither).
@@ -41,6 +41,7 @@ transit_cost: 0s # default: 0s (no penalty)
 
 # Local endpoint selectors. Nylon probes each peer endpoint through matching
 # binds and uses the best active link for the routing edge.
+# A router using tcp_obfuscation needs at least one named interface here.
 binds:
   - interface: eth0
     source: 192.0.2.10
@@ -81,6 +82,11 @@ must remain on that enabled interface's IPv4 subnet. Every participant must
 explicitly enable discovery on its local interface. The fixed discovery port is `57176`,
 so a node using LAN discovery cannot also use `57176` as its WireGuard port.
 
+Set `tcp_obfuscation: true` on both participating routers to add fake-TCP
+candidates beside UDP. See [TCP Obfuscation](/reference/tcp-obfuscation) for
+platform, interface, and port requirements, and
+[Endpoint Local Binds](/reference/endpoint-local-binds) for bind matching.
+
 ---
 
 ## central.yaml
@@ -103,6 +109,7 @@ dist:
 routers:
   - id: alice
     pubkey: xmfAovAKN4AY5ocK5s+/VsG9I27KrQ13Vzb0HOsLKAs==
+    # tcp_obfuscation: true # enable on both participating routers; see requirements above
     addresses: [10.0.0.1] # nylon interface addresses (auto-advertised as /32 or /128)
     # numeric_id: 16 # optional: pin this node's numeric id, which doubles as its
     #                # MPLS exit label. Must be >= 16 (labels 0-15 are reserved).
@@ -134,10 +141,11 @@ routers:
 
   - id: bob
     pubkey: 4GfHHSyVpXc+wkbjyIIONERa6Xf5EafB0nVGZLf2r2o=
+    # tcp_obfuscation: true
     addresses: [10.0.0.2, 10.1.0.2] # multiple addresses are fine
     endpoints:
       - "192.168.1.1:57175"
-      - "nylon.example.org" # port defaults to the node's configured port
+      - "nylon.example.org" # omitted port defaults to 57175
 
   - id: eve
     pubkey: 2mXTTD+FYdtJm/v1vSHz8qimvCucjW9vY+nLYacXJFE=

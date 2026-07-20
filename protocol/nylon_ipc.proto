@@ -56,6 +56,11 @@ message Advertisement {
   bool passive_hold = 5;
 }
 
+enum EndpointTransport {
+  UDP = 0;
+  FAKE_TCP = 1;
+}
+
 message EndpointInfo {
   string address = 1;
   optional string resolved = 2;
@@ -77,6 +82,7 @@ message EndpointInfo {
   // selected is true for the link this node currently sends on (the active
   // link with the lowest outbound delay + loss score).
   bool selected = 15;
+  EndpointTransport transport = 16;
 }
 
 message WireGuardPeerStats {

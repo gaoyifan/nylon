@@ -1,0 +1,243 @@
+---
+title: TCP Obfuscation
+description: How Nylon carries WireGuard datagrams in TCP-shaped packets alongside UDP.
+sidebar:
+  order: 2
+---
+
+TCP obfuscation is an optional Linux transport for links between Nylon routers.
+It adds a `fake-tcp` candidate beside the normal `udp` candidate and changes
+the packet headers visible on the underlay. WireGuard still encrypts and
+authenticates every carried datagram.
+
+TCP obfuscation does **not** disable UDP, force selection of `fake-tcp`, or turn
+WireGuard into a reliable TCP stream. Nylon measures both candidates and uses
+whichever one performs better.
+
+## Requirements
+
+Each participating router needs:
+
+- Linux 6.6 or newer on amd64 or arm64 (Android is not supported).
+- `tcp_obfuscation: true` in its router entry in `central.yaml`.
+- At least one named-interface `bind` in its own `node.yaml`.
+- Permission to load eBPF programs and attach TCX programs to that interface.
+- `rx-lro` and `rx-gro-hw` disabled on every named bind interface.
+
+For every published endpoint, UDP and TCP must use the same public port number.
+`port` is required in `node.yaml`; `57175` is only the conventional value. A
+published endpoint with no port independently defaults to `57175` rather than
+inheriting the remote node's local `port`.
+
+The TCP port on an attached interface is reserved for Nylon. A normal TCP
+service cannot share it: the ingress TCX program intercepts packets addressed
+to Nylon's port before the host TCP stack.
+
+## Configuration
+
+### Enable both routers
+
+The capability is declared per router and must be enabled at both ends of a
+link. It is not a per-peer or per-endpoint option:
+
+```yaml title="central.yaml"
+routers:
+  - id: alice
+    pubkey: xmfAovAKN4AY5ocK5s+/VsG9I27KrQ13Vzb0HOsLKAs==
+    tcp_obfuscation: true
+    endpoints:
+      - "alice.example.com:57175"
+
+  - id: bob
+    pubkey: 4GfHHSyVpXc+wkbjyIIONERa6Xf5EafB0nVGZLf2r2o=
+    tcp_obfuscation: true
+    endpoints:
+      - "bob.example.com:57175"
+
+graph:
+  - alice, bob
+```
+
+If only one router enables the capability, the pair remains UDP-only.
+Endpoints keep their usual `host:port` form; do not add a `tcp://` scheme.
+
+### Bind an underlay interface
+
+Each enabled router needs a local bind that names the interface carrying the
+underlay traffic:
+
+```yaml title="node.yaml"
+id: alice
+key: 0NcrMcaS1tORCTA88L5ZPE+H6yUMV4e5vRp6iypnPW8=
+port: 57175
+
+binds:
+  - interface: eth0
+    # source: 192.0.2.10 # optional explicit source address
+```
+
+For every matching peer endpoint and interface-bearing bind, Nylon creates
+separate `udp` and `fake-tcp` candidates. Source-only binds, unbound endpoints,
+and LAN-discovered endpoints remain UDP-only. See
+[Endpoint Local Binds](/reference/endpoint-local-binds) for bind matching and
+source-address behaviour.
+
+Once the carrier is established, a WireGuard-authenticated probe can teach the
+receiving router a reverse `fake-tcp` candidate. The two routers therefore do
+not both need published endpoints.
+
+### Disable hardware receive aggregation
+
+Inspect the interface features before starting Nylon:
+
+```sh
+ethtool -k eth0
+```
+
+Both LRO and hardware GRO must be off. They can be disabled with:
+
+```sh
+sudo ethtool -K eth0 lro off rx-gro-hw off
+```
+
+Nylon checks the kernel features named `rx-lro` and `rx-gro-hw` at startup and
+refuses to attach the transport while either is active. Keep both features off
+for the lifetime of the process.
+
+### Validate and restart
+
+Validate the configuration before deployment:
+
+```sh
+nylon verify central.yaml --node node.yaml
+```
+
+Validation checks the platform and named-interface bind. Kernel version,
+interface features, and TCX attachment are checked when Nylon starts. Changing
+the local router's `tcp_obfuscation` value requires a restart.
+
+`no_net_configure: true` does not disable this attachment. An enabled router
+still installs TCX programs on every named bind interface.
+
+## Firewall and NAT
+
+Upstream routers, NAT devices, cloud security groups, and external firewalls
+that see the wire packets must allow or forward both UDP and TCP for every
+published Nylon endpoint. The two protocols use the same numeric port:
+
+```text
+upstream UDP 57175 -> Nylon node port 57175
+upstream TCP 57175 -> Nylon node port 57175
+```
+
+An external router may translate both protocols from another shared public
+port to the node's configured port. For example, `alice.example.com:443` may
+map both UDP 443 and TCP 443 to port 57175 on Alice. Configure the central
+endpoint as `alice.example.com:443`.
+
+Port translation on the Nylon host itself is not supported because TCX matches
+the configured local port before host NAT can rewrite it. TCP reverse proxies,
+TLS terminators, and stream load balancers are also unsupported: fake-TCP is a
+packet carrier, not a byte-stream connection. See
+[Port Forwarding](/guides/port-forward) for the general endpoint setup.
+
+The host has no TCP listener for this feature. Configure upstream policy from
+the on-wire TCP and UDP headers.
+
+## How it works
+
+Nylon opens a separate UDP carrier socket for each available address family.
+Each data carrier stores a small connection header followed by one complete
+WireGuard datagram; handshake carriers contain only connection state.
+
+The outer SYN, ACK, FIN, and RST control packets are not WireGuard-authenticated.
+They carry no mesh payload, and a candidate still requires an authenticated
+WireGuard probe to become active.
+
+On every named bind interface, TCX programs transform packets in both
+directions:
+
+1. Egress recognizes Nylon's carrier on the configured source port and
+   replaces its UDP header with a TCP-shaped header.
+2. Ingress recognizes the corresponding TCP-shaped packets on the configured
+   destination port and restores the internal UDP carrier before socket
+   delivery.
+3. Traffic outside the managed carrier and port path is left unchanged.
+   Packets recognized as managed carrier traffic but failing carrier validation
+   are dropped.
+
+The transformer handles ordinary IPv4 and IPv6 packets. Fragmented packets,
+IPv4 options, and IPv6 extension-header paths are not carrier formats.
+
+The Linux TCP stack does not own this connection. Nylon maintains the minimal
+sequence state needed for a SYN/SYN-ACK/ACK handshake, TCP-shaped data packets,
+and FIN/RST handling. Consequently, `ss -ltn` shows no listener and `ss -tn`
+shows no connection for the carrier. It cannot be consumed through a normal
+TCP socket.
+
+Data packets use TCP sequence and acknowledgement fields, but Nylon does not
+add TCP retransmission, reassembly, flow control, or congestion control.
+Every outgoing data packet carries the current receive sequence high-water mark
+in its acknowledgement field. Sending data resets the pending standalone-ACK
+count. Otherwise, Nylon emits a standalone ACK after that high-water mark
+advances by approximately 32 MiB of forward TCP sequence space. Packet loss and
+reordering remain datagram events; the carrier adds no TCP recovery. An inbound
+FIN or RST removes the userspace flow state, after which endpoint preparation
+can establish a new flow.
+
+## Candidate selection and lifecycle
+
+UDP is always retained as an independent candidate. Nylon gives neither
+transport a tie-break preference: selection uses only the measured endpoint
+delay and loss score described in [Link Metrics](/reference/link-metrics).
+
+WireGuard endpoint synchronization prepares each fake-TCP candidate and starts
+its handshake. Probe attempts perform the same preparation and retry an
+incomplete handshake. The candidate cannot become active until the handshake
+completes and a WireGuard-authenticated probe succeeds. Stale flow state expires
+automatically; receiving FIN or RST removes it immediately.
+
+Nylon watches every interface that has attached TCX programs. Removing,
+renaming, or recreating one of those interfaces terminates the running process
+instead of continuing with an incomplete transformation path.
+
+The TCP-shaped header adds 12 bytes over the normal UDP header. The default
+Nylon interface MTU is therefore 1408 for all transports, rather than changing
+conditionally when TCP obfuscation is enabled. A configured custom MTU is not
+adjusted automatically.
+
+## Observability
+
+`nylon status` includes a `transport` column for every endpoint candidate:
+
+- `udp` is the normal WireGuard-over-UDP candidate.
+- `fake-tcp` is the TCP-shaped candidate.
+
+The `state` column shows `active` and marks the selected candidate as `best`.
+`nylon status --full` additionally shows RTT, directional delay, and loss. A
+configured `fake-tcp` row can therefore be present but inactive while its
+handshake or network path is unavailable.
+
+At startup, a successful attachment logs `enabled fake TCP transport` with the
+managed interfaces and port.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| `tcp_obfuscation requires linux on amd64 or arm64` | Run Nylon on a supported Linux architecture. |
+| `tcp_obfuscation requires at least one bind with an interface` | Add `binds: [{interface: ...}]` to that router's `node.yaml`. |
+| `fake TCP requires rx-lro off` or `rx-gro-hw off` | Disable the named feature on the interface and restart Nylon. |
+| TCX or eBPF attachment fails | Confirm Linux is at least 6.6 and Nylon has permission to load and attach the programs. |
+| No `fake-tcp` candidate appears | Confirm both router entries enable the capability and the local candidate uses a named-interface bind. |
+| The `fake-tcp` candidate stays inactive | Check that TCP reaches the published port in both directions and that both Nylon processes are running. |
+| Nylon exits after a link change | A managed interface was removed, renamed, or recreated; restart Nylon after restoring it. |
+
+TCP obfuscation only changes the carrier's wire appearance. It does not add a
+new security boundary, impersonate TLS, or guarantee traversal through TCP
+proxies or every filtering network. WireGuard remains responsible for payload
+confidentiality, integrity, and peer authentication.
+
+The implementation was informed by
+[Mimic](https://github.com/hack3ric/mimic) as a design reference; no wire-format
+interoperability is implied.

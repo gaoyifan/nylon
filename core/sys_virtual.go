@@ -50,20 +50,3 @@ func NewWireGuardDevice(n *Nylon) (dev *device.Device, tunDevice tun.Device, rea
 	n.Log.Info("Created WireGuard interface", "name", itfName)
 	return dev, tdev, itfName, nil
 }
-
-func CleanupWireGuardDevice(n *Nylon) error {
-	if n.Device != nil {
-		err := n.Device.Bind().Close()
-		if err != nil {
-			return err
-		}
-		n.Device.Close()
-	}
-	if n.wgUapi != nil {
-		err := n.wgUapi.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}

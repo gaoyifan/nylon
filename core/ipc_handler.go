@@ -274,6 +274,7 @@ func buildEndpoints(neigh *state.Neighbour) []*protocol.EndpointInfo {
 			OutExcessNs:        outExcess,
 			InExcessNs:         inExcess,
 			Selected:           ep == best,
+			Transport:          protocol.EndpointTransport(nep.Transport),
 		})
 	}
 	slices.SortFunc(eps, func(a, b *protocol.EndpointInfo) int {

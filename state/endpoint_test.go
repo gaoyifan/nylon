@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/encodeous/nylon/polyamide/conn"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -358,6 +359,16 @@ func TestCompareEndpointsActiveFirst(t *testing.T) {
 	links := []Endpoint{dead, active.ep}
 	slices.SortStableFunc(links, CompareEndpoints)
 	assert.Same(t, active.ep, links[0].AsNylonEndpoint())
+}
+
+func TestCompareEndpointsDoesNotPreferUDPOnExactEquality(t *testing.T) {
+	tun := DefaultRouterTunables()
+	udp := NewEndpoint(NewDynamicEndpoint("192.0.2.1:1"), false, nil, &tun)
+	fakeTCP := NewEndpoint(NewDynamicEndpoint("192.0.2.1:1"), false, nil, &tun)
+	fakeTCP.Transport = conn.TransportFakeTCP
+
+	assert.Zero(t, CompareEndpoints(udp, fakeTCP))
+	assert.Zero(t, CompareEndpoints(fakeTCP, udp))
 }
 
 func TestEchoValidation(t *testing.T) {

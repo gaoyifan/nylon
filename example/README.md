@@ -35,7 +35,18 @@ Notice nodes can have 0 or more accessible endpoints. Nylon will regularly try t
 
 ### Running the network
 
-Before running Nylon, make sure to open UDP port `57175` (or whatever data port you configured) so that Nylon can communicate. Nodes with `lan_discovery` enabled must also allow UDP `57176` subnet broadcast on each listed interface. Without further to do, simply run `nylon run` (you may need CAP_NET_ADMIN or sudo).
+Before running Nylon, allow or forward UDP for each published endpoint. When
+both routers on a graph edge enable `tcp_obfuscation`, also allow or forward
+TCP on the same published port; UDP remains a separately measured candidate.
+An upstream NAT may map that shared public UDP/TCP port to the required local
+`port` in `node.yaml`, but port translation on the Nylon host is unsupported.
+See [TCP Obfuscation](../docs/reference/tcp-obfuscation.mdx) for the complete
+requirements.
+
+Nodes with `lan_discovery` enabled must also allow UDP `57176` subnet broadcast
+on each listed interface. Run Nylon as root or with the required network
+permissions; fake-TCP additionally needs permission to load eBPF programs and
+attach TCX programs.
 
 After a while (5-10 seconds), you will notice that the network has converged!
 

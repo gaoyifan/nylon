@@ -74,7 +74,7 @@ func CreateTUNWithRequestedGUID(ifname string, requestedGUID *windows.GUID, mtu 
 		return nil, fmt.Errorf("Error creating interface: %w", err)
 	}
 
-	forcedMTU := 1420
+	forcedMTU := 1408
 	if mtu > 0 {
 		forcedMTU = mtu
 	}

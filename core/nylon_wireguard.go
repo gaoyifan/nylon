@@ -3,20 +3,35 @@ package core
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"runtime"
 	"slices"
 
 	"github.com/encodeous/nylon/polyamide/conn"
 	"github.com/encodeous/nylon/polyamide/device"
+	"github.com/encodeous/nylon/polyamide/faketcp"
 	"github.com/encodeous/nylon/state"
 )
 
-func (n *Nylon) initWireGuard() error {
+var closeFakeTCPManager = func(manager *faketcp.Manager) error {
+	return manager.Close()
+}
+
+func (n *Nylon) initWireGuard() (retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, n.closeWireGuardTransport())
+		}
+	}()
+
 	dev, tdev, itfName, err := NewWireGuardDevice(n)
 	if err != nil {
 		return err
 	}
+	n.Device = dev
+	n.Tun = tdev
+	n.Interface = itfName
 
 	// Must be set before Up() starts the TUN reader goroutine. Always on:
 	// a bare MPLS packet routed into the TUN is re-framed as a NyUnicast/MPLS
@@ -29,10 +44,6 @@ func (n *Nylon) initWireGuard() error {
 	if err != nil {
 		return err
 	}
-
-	n.Device = dev
-	n.Tun = tdev
-	n.Interface = itfName
 
 	n.InstallTC()
 	n.Log.Info("installed nylon traffic control filter for polysock")
@@ -53,6 +64,34 @@ listen_port=%d
 	)
 	if err != nil {
 		return fmt.Errorf("failed to configure wg device: %v", err)
+	}
+	if n.CentralCfg.IsRouter(n.LocalCfg.Id) && n.GetRouter(n.LocalCfg.Id).TCPObfuscation {
+		interfaceSet := make(map[string]struct{})
+		for _, bind := range n.LocalCfg.Binds {
+			if bind.Interface != "" {
+				interfaceSet[bind.Interface] = struct{}{}
+			}
+		}
+		interfaces := make([]string, 0, len(interfaceSet))
+		for name := range interfaceSet {
+			interfaces = append(interfaces, name)
+		}
+		slices.Sort(interfaces)
+		manager, err := faketcp.Attach(n.Port, interfaces)
+		if err != nil {
+			return fmt.Errorf("attach fake TCP TCX programs: %w", err)
+		}
+		n.fakeTCP = manager
+		go func() {
+			select {
+			case err, ok := <-manager.Errors():
+				if ok && err != nil {
+					n.Cancel(fmt.Errorf("fake TCP interface lifecycle: %w", err))
+				}
+			case <-n.Context.Done():
+			}
+		}()
+		n.Log.Info("enabled fake TCP transport", "interfaces", interfaces, "port", n.Port)
 	}
 
 	// add peers
@@ -104,17 +143,20 @@ listen_port=%d
 }
 
 func (n *Nylon) cleanupWireGuard() error {
+	var cleanupErr error
 	// remove routes
 	for _, route := range n.AppliedSystem.Routes {
 		err := RemoveRoute(n.Log, n.Tun, n.Interface, route)
 		if err != nil {
 			n.Log.Error("failed to remove route", "err", err)
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	for _, addr := range n.AppliedSystem.Aliases {
 		err := RemoveAlias(n.Log, n.Interface, addr)
 		if err != nil {
 			n.Log.Error("failed to remove alias", "err", err)
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	// run pre-down commands
@@ -122,20 +164,49 @@ func (n *Nylon) cleanupWireGuard() error {
 		err := ExecSplit(n.Log, cmd)
 		if err != nil {
 			n.Log.Error("failed to run pre-down command", "err", err)
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
-	err := CleanupWireGuardDevice(n)
-	if err != nil {
-		return err
+	if err := n.closeWireGuardTransport(); err != nil {
+		n.Log.Error("failed to close WireGuard transport", "error", err)
+		cleanupErr = errors.Join(cleanupErr, err)
 	}
 	// run post-down commands
 	for _, cmd := range n.PostDown {
-		err = ExecSplit(n.Log, cmd)
+		err := ExecSplit(n.Log, cmd)
 		if err != nil {
 			n.Log.Error("failed to run post-down command", "err", err)
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
-	return nil
+	return cleanupErr
+}
+
+// closeWireGuardTransport keeps TCX attached until the WireGuard device has
+// stopped and its normal and fake carrier sockets are closed.
+func (n *Nylon) closeWireGuardTransport() error {
+	var cleanupErr error
+	if n.Device != nil {
+		if err := n.Device.BindClose(); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+		n.Device.Close()
+		n.Device = nil
+		n.Tun = nil
+	}
+	if n.wgUapi != nil {
+		if err := n.wgUapi.Close(); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+		n.wgUapi = nil
+	}
+	if n.fakeTCP != nil {
+		if err := closeFakeTCPManager(n.fakeTCP); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+		n.fakeTCP = nil
+	}
+	return cleanupErr
 }
 
 func (n *Nylon) SyncWireGuard() error {

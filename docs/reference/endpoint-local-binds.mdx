@@ -2,7 +2,7 @@
 
 Nylon keeps routing decisions separate from transport endpoint selection.
 Routing chooses which node to visit next. Endpoint selection chooses which
-underlay address, source address, and local interface are used for the UDP
+underlay address, transport, source address, and local interface are used for the
 packet sent to that next node.
 
 ## Model
@@ -13,8 +13,8 @@ edge, and Nylon surfaces the best active endpoint metric to the router.
 
 At the link level, a Nylon endpoint may carry an optional local bind selector:
 
-- source address: the local address to use for the outgoing UDP packet
-- interface index: the local interface to constrain the outgoing UDP packet to
+- source address: the local address to use for the outgoing packet
+- interface index: the local interface to constrain the outgoing packet to
 
 The source address and endpoint address must be in the same IP family when a
 source address is configured. If no local bind selector is configured, endpoint
@@ -36,8 +36,23 @@ binds are applied to all endpoint families. If `binds` is empty, Nylon keeps the
 default behaviour and creates one unbound candidate per endpoint.
 
 This design does not create one socket per local bind. A Nylon device owns one
-IPv4 UDP socket and one IPv6 UDP socket when both address families are
-available. Local bind selectors are attached to endpoint sends.
+normal UDP socket per available address family. Enabling fake-TCP adds one
+carrier socket per available family, not one socket per bind. Local bind
+selectors are attached to endpoint sends.
+
+## Optional fake-TCP transport
+
+`tcp_obfuscation: true` is a per-router capability in `central.yaml`. A
+fake-TCP candidate is created only when both routers enable it and the local
+candidate has a named `interface` bind. The normal UDP candidate is retained,
+so UDP and fake-TCP coexist for the same endpoint and bind. Source-only binds,
+unbound endpoints, and LAN-discovered endpoints remain UDP-only.
+
+Among active candidates, Nylon gives neither transport a preference: measured
+endpoint performance alone selects which candidate is used.
+
+See [TCP Obfuscation](/reference/tcp-obfuscation) for platform requirements,
+wire behaviour, port forwarding, and troubleshooting.
 
 ## Linux Transport
 

@@ -2,6 +2,7 @@ package core
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -117,6 +118,9 @@ func (n *Nylon) sendEndpointProbeWithDiscovery(node state.NodeId, ep *state.Nylo
 	}
 	nep, err := ep.GetWgEndpoint(n.Device)
 	if err != nil {
+		if errors.Is(err, conn.ErrFakeTCPNotEstablished) {
+			return fail(protocol.EndpointProbeStatus_ENDPOINT_PROBE_SEND_ERROR, err)
+		}
 		return fail(protocol.EndpointProbeStatus_ENDPOINT_PROBE_RESOLVE_ERROR, err)
 	}
 	resolved = nep.DstIPPort().String()
@@ -176,6 +180,15 @@ func handleProbe(n *Nylon, pkt *protocol.Ny_Probe, endpoint conn.Endpoint, peer 
 	if pkt.TxTs == 0 {
 		return // legacy or malformed probe, cannot be measured
 	}
+	if stdEndpoint, ok := endpoint.(*conn.StdNetEndpoint); ok && stdEndpoint.Transport() == conn.TransportFakeTCP {
+		peers := n.fakeTCPPeers.Load()
+		if pkt.Discovery || peers == nil {
+			return
+		}
+		if _, ok := (*peers)[node]; !ok {
+			return
+		}
+	}
 	if !pkt.Reply {
 		// ping: answer immediately in-dataplane, echoing the ping's
 		// timestamps so the sender can compute its outbound relative
@@ -225,7 +238,10 @@ func handleProbePing(n *Nylon, node state.NodeId, pkt *protocol.Ny_Probe, wgEndp
 	if neigh == nil {
 		return
 	}
-
+	receivedTransport := conn.TransportUDP
+	if stdEndpoint, ok := wgEndpoint.(*conn.StdNetEndpoint); ok {
+		receivedTransport = stdEndpoint.Transport()
+	}
 	receivedInterface := ""
 	receivedIfIndex := 0
 	if indexed, ok := wgEndpoint.(interface{ SrcIfidx() int32 }); ok {
@@ -246,11 +262,28 @@ func handleProbePing(n *Nylon, node state.NodeId, pkt *protocol.Ny_Probe, wgEndp
 		}
 	}
 
+	if receivedTransport == conn.TransportFakeTCP && receivedInterface == "" {
+		return
+	}
+	receivedSource := wgEndpoint.SrcIP()
 	var existing, fallback *state.NylonEndpoint
 	for _, endpoint := range neigh.Eps {
 		dep := endpoint.AsNylonEndpoint()
 		ap, err := dep.DynEP.Get()
-		if err != nil || ap != wgEndpoint.DstIPPort() {
+		if err != nil || ap != wgEndpoint.DstIPPort() || dep.Transport != receivedTransport {
+			continue
+		}
+		if receivedTransport == conn.TransportFakeTCP {
+			if dep.Bind.Interface != receivedInterface {
+				continue
+			}
+			if dep.Bind.Source.IsValid() && dep.Bind.Source == receivedSource {
+				existing = dep
+				break
+			}
+			if !dep.Bind.Source.IsValid() && fallback == nil {
+				fallback = dep
+			}
 			continue
 		}
 		if dep.IsRemote() && dep.Bind.Interface != "" && dep.Bind.Interface == receivedInterface {
@@ -280,8 +313,12 @@ func handleProbePing(n *Nylon, node state.NodeId, pkt *protocol.Ny_Probe, wgEndp
 	}
 
 	newEp := state.NewEndpoint(state.NewDynamicEndpoint(wgEndpoint.DstIPPort().String()), true, wgEndpoint, &n.RouterTunables)
-	if pkt.Discovery {
+	newEp.Transport = receivedTransport
+	if pkt.Discovery || receivedTransport == conn.TransportFakeTCP {
 		newEp.Bind.Interface = receivedInterface
+	}
+	if receivedTransport == conn.TransportFakeTCP {
+		newEp.Bind.Source = receivedSource
 	}
 	newEp.Renew()
 	observeProbe(newEp, pkt, rxTs)

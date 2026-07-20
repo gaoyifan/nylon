@@ -49,6 +49,11 @@ If you've ever used BitTorrent, this is the same as being **"connectable."** Jus
    - **Protocol**: `UDP`
    - **Internal IP**: The local IP address of the machine running nylon.
 
+   If both routers use `tcp_obfuscation`, add a TCP rule matching the UDP rule's
+   external and internal port numbers. UDP remains available, so both rules are
+   needed to expose both candidates. See
+   [TCP Obfuscation](/reference/tcp-obfuscation) for host and NAT constraints.
+
 2. #### Handle Dynamic IPs (DDNS)
 
    If your home or office has a dynamic public IP address, you should use a **Dynamic DNS (DDNS)** service. This ensures that even when your IP changes, other nodes can still find you.
@@ -86,6 +91,10 @@ If you've ever used BitTorrent, this is the same as being **"connectable."** Jus
 
 ### What if I use a different port?
 If you use a custom port, you should configure it in your `node.yaml` (for local port), specify it in the `endpoints` section of your node in `central.yaml` (for forwarded port), and update your router's port forwarding rule accordingly.
+
+With fake-TCP enabled, the published UDP and TCP endpoint ports must use the
+same number. An external router may translate that number to the node's local
+port for both protocols; port translation on the Nylon host is not supported.
 
 <Tabs>
   <TabItem label="node.yaml">

@@ -29,10 +29,15 @@ var controlFns = []controlFn{}
 // listenConfig returns a net.ListenConfig that applies the controlFns to the
 // socket prior to bind. This is used to apply socket buffer sizing and packet
 // information OOB configuration for sticky sockets.
-func listenConfig() *net.ListenConfig {
+func listenConfig(extra ...controlFn) *net.ListenConfig {
 	return &net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			for _, fn := range controlFns {
+				if err := fn(network, address, c); err != nil {
+					return err
+				}
+			}
+			for _, fn := range extra {
 				if err := fn(network, address, c); err != nil {
 					return err
 				}

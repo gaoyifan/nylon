@@ -144,7 +144,7 @@ func (t *chTun) BatchSize() int {
 	return 1
 }
 
-const DefaultMTU = 1420
+const DefaultMTU = 1408
 
 func (t *chTun) MTU() (int, error)        { return DefaultMTU, nil }
 func (t *chTun) Name() (string, error)    { return "loopbackTun1", nil }

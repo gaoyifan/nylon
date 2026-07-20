@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/encodeous/nylon/polyamide/conn"
 	"github.com/encodeous/nylon/state"
 )
 
@@ -30,6 +31,12 @@ func (n *Nylon) ApplyCentralConfig(cfg *state.CentralCfg) (ApplyResult, error) {
 	}
 	if !next.IsRouter(n.LocalCfg.Id) {
 		return ApplyRestartRequired, errors.New("local node is not a router in the new central config")
+	}
+	if !n.CentralCfg.IsRouter(n.LocalCfg.Id) {
+		return ApplyRestartRequired, errors.New("local node is not a router in the current central config")
+	}
+	if n.CentralCfg.GetRouter(n.LocalCfg.Id).TCPObfuscation != next.GetRouter(n.LocalCfg.Id).TCPObfuscation {
+		return ApplyRestartRequired, errors.New("changing local tcp_obfuscation requires a restart")
 	}
 	if reflect.DeepEqual(n.CentralCfg, next) {
 		return ApplyNoop, nil
@@ -57,14 +64,22 @@ func (n *Nylon) ApplyCentralConfig(cfg *state.CentralCfg) (ApplyResult, error) {
 }
 
 func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
+	localTCPObfuscation := false
+	if next.IsRouter(n.LocalCfg.Id) {
+		localTCPObfuscation = next.GetRouter(n.LocalCfg.Id).TCPObfuscation
+	}
 	desired := make(map[state.NodeId]state.RouterCfg)
+	fakeTCPPeers := make(map[state.NodeId]struct{})
 	for _, peer := range next.GetPeers(n.LocalCfg.Id) {
 		if !next.IsRouter(peer) {
 			continue
 		}
-		desired[peer] = next.GetRouter(peer)
+		cfg := next.GetRouter(peer)
+		desired[peer] = cfg
+		if localTCPObfuscation && cfg.TCPObfuscation {
+			fakeTCPPeers[peer] = struct{}{}
+		}
 	}
-
 	neighs := make([]*state.Neighbour, 0, len(desired))
 	for _, neigh := range n.RouterState.Neighbours {
 		cfg, ok := desired[neigh.Id]
@@ -74,7 +89,8 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 			continue
 		}
 		// configure existing neighbours
-		reconcileConfiguredEndpoints(neigh, configuredEndpoints(n.LocalCfg.Binds, cfg.Endpoints, &n.RouterTunables))
+		mutualTCPObfuscation := localTCPObfuscation && cfg.TCPObfuscation
+		reconcileConfiguredEndpoints(neigh, configuredEndpoints(n.LocalCfg.Binds, cfg.Endpoints, mutualTCPObfuscation, &n.RouterTunables), mutualTCPObfuscation)
 		neighs = append(neighs, neigh)
 		delete(desired, neigh.Id)
 	}
@@ -92,7 +108,7 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 			Routes: make(map[netip.Prefix]state.NeighRoute),
 			Eps:    make([]state.Endpoint, 0, len(cfg.Endpoints)),
 		}
-		stNeigh.Eps = append(stNeigh.Eps, configuredEndpoints(n.LocalCfg.Binds, cfg.Endpoints, &n.RouterTunables)...)
+		stNeigh.Eps = append(stNeigh.Eps, configuredEndpoints(n.LocalCfg.Binds, cfg.Endpoints, localTCPObfuscation && cfg.TCPObfuscation, &n.RouterTunables)...)
 		neighs = append(neighs, stNeigh)
 	}
 	n.RouterState.Neighbours = neighs
@@ -106,10 +122,11 @@ func (n *Nylon) reconcileRouterState(next *state.CentralCfg) error {
 		pubkeyMap[x.PubKey] = x.Id
 	}
 	n.PeerMap.Store(new(pubkeyMap))
+	n.fakeTCPPeers.Store(&fakeTCPPeers)
 	return nil
 }
 
-func configuredEndpoints(binds []state.LocalBind, endpoints []*state.DynamicEndpoint, t *state.RouterTunables) []state.Endpoint {
+func configuredEndpoints(binds []state.LocalBind, endpoints []*state.DynamicEndpoint, fakeTCPEnabled bool, t *state.RouterTunables) []state.Endpoint {
 	if len(binds) == 0 {
 		eps := make([]state.Endpoint, 0, len(endpoints))
 		for _, ep := range endpoints {
@@ -135,6 +152,12 @@ func configuredEndpoints(binds []state.LocalBind, endpoints []*state.DynamicEndp
 			nep := state.NewEndpoint(ep, false, nil, t)
 			nep.Bind = bind
 			eps = append(eps, nep)
+			if fakeTCPEnabled && bind.Interface != "" {
+				fakeTCP := state.NewEndpoint(ep, false, nil, t)
+				fakeTCP.Bind = bind
+				fakeTCP.Transport = conn.TransportFakeTCP
+				eps = append(eps, fakeTCP)
+			}
 		}
 	}
 	return eps
@@ -175,18 +198,20 @@ func bindMatchesEndpoint(bind state.LocalBind, ep *state.DynamicEndpoint) bool {
 }
 
 type endpointIdentity struct {
-	value string
-	bind  state.LocalBind
+	value     string
+	bind      state.LocalBind
+	transport conn.Transport
 }
 
 func endpointKey(ep *state.NylonEndpoint) endpointIdentity {
 	return endpointIdentity{
-		value: ep.DynEP.Value,
-		bind:  ep.Bind,
+		value:     ep.DynEP.Value,
+		bind:      ep.Bind,
+		transport: ep.Transport,
 	}
 }
 
-func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []state.Endpoint) {
+func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []state.Endpoint, allowRemoteFakeTCP bool) {
 	desiredByKey := make(map[endpointIdentity]state.Endpoint, len(desired))
 	for _, ep := range desired {
 		desiredByKey[endpointKey(ep.AsNylonEndpoint())] = ep
@@ -197,6 +222,9 @@ func reconcileConfiguredEndpoints(neigh *state.Neighbour, desired []state.Endpoi
 	for _, ep := range neigh.Eps {
 		nep := ep.AsNylonEndpoint()
 		if ep.IsRemote() {
+			if nep.Transport == conn.TransportFakeTCP && !allowRemoteFakeTCP {
+				continue
+			}
 			eps = append(eps, ep)
 			continue
 		}

@@ -181,23 +181,26 @@ retransmissions.
 
 ## Observability
 
-`nylon status --full` shows the per-endpoint measurements:
+`nylon status` always shows:
 
-- `sel` — marks the link this node currently sends on (best outbound
-  score).
+- `transport` — `udp` or `fake-tcp` for the candidate.
+- `state` — marks the selected link as `best` alongside its activity state.
+- `metric` — per-link RTT-based cost (stabilized RTT with the link's own
+  loss penalty), used for display and as a fallback ordering.
+
+`nylon status --full` additionally shows:
+
 - `out delay` / `in delay` — **excess** delay of the link relative to the
   neighbour's best link in each direction. Absolute one-way delays are
   unknowable, but these differences are exact; the preferred link in a
   direction shows `+0s`.
 - `rtt` / `stable rtt` — offset-free RTT from the two filter stages.
 - `loss` — smoothed probe loss rate.
-- `metric` — per-link RTT-based cost (stabilized RTT with the link's own
-  loss penalty), used for display and as a fallback ordering.
 
 Each neighbour also shows its `link cost` — the effective cycle latency
 metric advertised to routing. The same fields are available programmatically
-via the IPC status response (`EndpointInfo.out_excess_ns`, `in_excess_ns`,
-`selected`, `NeighbourInfo.link_cost`).
+via the IPC status response (`EndpointInfo.transport`, `out_excess_ns`,
+`in_excess_ns`, `selected`, `NeighbourInfo.link_cost`).
 
 ## Testing
 

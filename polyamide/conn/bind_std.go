@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/encodeous/nylon/perf"
 	"golang.org/x/net/ipv4"
@@ -34,8 +35,12 @@ type StdNetBind struct {
 	mu            sync.Mutex // protects all fields except as specified
 	ipv4          *net.UDPConn
 	ipv6          *net.UDPConn
+	fakeIPv4      *net.UDPConn
+	fakeIPv6      *net.UDPConn
 	ipv4PC        *ipv4.PacketConn // will be nil on non-Linux
 	ipv6PC        *ipv6.PacketConn // will be nil on non-Linux
+	fakeIPv4PC    *ipv4.PacketConn
+	fakeIPv6PC    *ipv6.PacketConn
 	ipv4TxOffload bool
 	ipv4RxOffload bool
 	ipv6TxOffload bool
@@ -47,6 +52,12 @@ type StdNetBind struct {
 
 	blackhole4 bool
 	blackhole6 bool
+
+	fakeTCPEnabled    bool
+	fakeTCPStaleAfter time.Duration
+	fakeTCPMu         sync.Mutex
+	fakeTCPStates     map[fakeTCPFlowKey]*fakeTCPFlow
+	fakeTCPLastClean  time.Time
 }
 
 func NewStdNetBind() Bind {
@@ -81,7 +92,23 @@ type StdNetEndpoint struct {
 	// supported. Typically this is a PKTINFO structure from/for control
 	// messages, see unix.PKTINFO for an example.
 	src []byte
+	// transport selects the wire carrier used for this endpoint. The zero value
+	// is UDP so endpoints produced by ParseEndpoint and receive paths retain the
+	// existing behavior unless explicitly changed.
+	transport Transport
 }
+
+// Transport identifies the wire carrier used for an endpoint.
+type Transport uint8
+
+const (
+	TransportUDP Transport = iota
+	TransportFakeTCP
+)
+
+func (e *StdNetEndpoint) Transport() Transport { return e.transport }
+
+func (e *StdNetEndpoint) SetTransport(transport Transport) { e.transport = transport }
 
 var (
 	_ Bind     = (*StdNetBind)(nil)
@@ -124,8 +151,12 @@ func (e *StdNetEndpoint) DstIPPort() netip.AddrPort {
 	return e.AddrPort
 }
 
-func listenNet(network string, port int) (*net.UDPConn, int, error) {
-	conn, err := listenConfig().ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
+func listenNet(network string, port int, control controlFn) (*net.UDPConn, int, error) {
+	config := listenConfig()
+	if control != nil {
+		config = listenConfig(control)
+	}
+	conn, err := config.ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -149,7 +180,7 @@ func (s *StdNetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 	var err error
 	var tries int
 
-	if s.ipv4 != nil || s.ipv6 != nil {
+	if s.ipv4 != nil || s.ipv6 != nil || s.fakeIPv4 != nil || s.fakeIPv6 != nil {
 		return nil, 0, ErrBindAlreadyOpen
 	}
 
@@ -157,47 +188,100 @@ func (s *StdNetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 	// If uport is 0, we can retry on failure.
 again:
 	port := int(uport)
-	var v4conn, v6conn *net.UDPConn
-	var v4pc *ipv4.PacketConn
-	var v6pc *ipv6.PacketConn
-
-	v4conn, port, err = listenNet("udp4", port)
+	var v4conn, v6conn, fakeV4conn, fakeV6conn *net.UDPConn
+	closeOpened := func() {
+		for _, conn := range []*net.UDPConn{v4conn, v6conn, fakeV4conn, fakeV6conn} {
+			if conn != nil {
+				_ = conn.Close()
+			}
+		}
+	}
+	var control controlFn
+	if s.fakeTCPEnabled {
+		control = fakeTCPListenControl(false)
+	}
+	var selectedPort int
+	v4conn, selectedPort, err = listenNet("udp4", port, control)
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
 		return nil, 0, err
 	}
+	if err == nil {
+		port = selectedPort
+	}
+	if v4conn != nil && s.fakeTCPEnabled {
+		fakeV4conn, _, err = listenNet("udp4", port, fakeTCPListenControl(true))
+		if err != nil {
+			closeOpened()
+			return nil, 0, err
+		}
+	}
 
 	// Listen on the same port as we're using for ipv4.
-	v6conn, port, err = listenNet("udp6", port)
+	v6conn, selectedPort, err = listenNet("udp6", port, control)
 	if uport == 0 && errors.Is(err, syscall.EADDRINUSE) && tries < 100 {
-		v4conn.Close()
+		closeOpened()
 		tries++
 		goto again
 	}
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
-		v4conn.Close()
+		closeOpened()
 		return nil, 0, err
+	}
+	if err == nil {
+		port = selectedPort
+	}
+	if v6conn != nil && s.fakeTCPEnabled {
+		fakeV6conn, _, err = listenNet("udp6", port, fakeTCPListenControl(true))
+		if uport == 0 && errors.Is(err, syscall.EADDRINUSE) && tries < 100 {
+			closeOpened()
+			tries++
+			goto again
+		}
+		if err != nil {
+			closeOpened()
+			return nil, 0, err
+		}
 	}
 	var fns []ReceiveFunc
 	if v4conn != nil {
 		s.ipv4TxOffload, s.ipv4RxOffload = supportsUDPOffload(v4conn)
+		var v4pc *ipv4.PacketConn
 		if runtime.GOOS == "linux" || runtime.GOOS == "android" {
 			v4pc = ipv4.NewPacketConn(v4conn)
 			s.ipv4PC = v4pc
 		}
-		fns = append(fns, s.makeReceiveIPv4(v4pc, v4conn, s.ipv4RxOffload))
+		fns = append(fns, s.makeReceiveIPv4(v4pc, v4conn, s.ipv4RxOffload, s.fakeTCPEnabled))
 		s.ipv4 = v4conn
+	}
+	if fakeV4conn != nil {
+		s.fakeIPv4PC = ipv4.NewPacketConn(fakeV4conn)
+		fns = append(fns, s.makeReceiveIPv4(s.fakeIPv4PC, fakeV4conn, false, true))
+		s.fakeIPv4 = fakeV4conn
 	}
 	if v6conn != nil {
 		s.ipv6TxOffload, s.ipv6RxOffload = supportsUDPOffload(v6conn)
+		var v6pc *ipv6.PacketConn
 		if runtime.GOOS == "linux" || runtime.GOOS == "android" {
 			v6pc = ipv6.NewPacketConn(v6conn)
 			s.ipv6PC = v6pc
 		}
-		fns = append(fns, s.makeReceiveIPv6(v6pc, v6conn, s.ipv6RxOffload))
+		fns = append(fns, s.makeReceiveIPv6(v6pc, v6conn, s.ipv6RxOffload, s.fakeTCPEnabled))
 		s.ipv6 = v6conn
 	}
+	if fakeV6conn != nil {
+		s.fakeIPv6PC = ipv6.NewPacketConn(fakeV6conn)
+		fns = append(fns, s.makeReceiveIPv6(s.fakeIPv6PC, fakeV6conn, false, true))
+		s.fakeIPv6 = fakeV6conn
+	}
 	if len(fns) == 0 {
+		closeOpened()
 		return nil, 0, syscall.EAFNOSUPPORT
+	}
+	if s.fakeTCPEnabled {
+		s.fakeTCPMu.Lock()
+		s.fakeTCPStates = make(map[fakeTCPFlowKey]*fakeTCPFlow)
+		s.fakeTCPLastClean = time.Time{}
+		s.fakeTCPMu.Unlock()
 	}
 
 	return fns, uint16(port), nil
@@ -232,6 +316,7 @@ func (s *StdNetBind) receiveIP(
 	br batchReader,
 	conn *net.UDPConn,
 	rxOffload bool,
+	fakeTCPEnabled bool,
 	bufs [][]byte,
 	sizes []int,
 	eps []Endpoint,
@@ -279,20 +364,26 @@ func (s *StdNetBind) receiveIP(
 		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
 		ep := &StdNetEndpoint{AddrPort: addrPort} // TODO: remove allocation
 		getSrcFromControl(msg.OOB[:msg.NN], ep)
+		if fakeTCPEnabled {
+			size, carrier := s.receiveFakeTCP(msg.Buffers[0][:sizes[i]], ep)
+			if carrier {
+				sizes[i] = size
+			}
+		}
 		eps[i] = ep
 	}
 	return numMsgs, nil
 }
 
-func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
+func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload, fakeTCPEnabled bool) ReceiveFunc {
 	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
+		return s.receiveIP(pc, conn, rxOffload, fakeTCPEnabled, bufs, sizes, eps)
 	}
 }
 
-func (s *StdNetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
+func (s *StdNetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxOffload, fakeTCPEnabled bool) ReceiveFunc {
 	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
+		return s.receiveIP(pc, conn, rxOffload, fakeTCPEnabled, bufs, sizes, eps)
 	}
 }
 
@@ -309,16 +400,26 @@ func (s *StdNetBind) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var err1, err2 error
+	var closeErrors []error
 	if s.ipv4 != nil {
-		err1 = s.ipv4.Close()
+		closeErrors = append(closeErrors, s.ipv4.Close())
 		s.ipv4 = nil
 		s.ipv4PC = nil
 	}
 	if s.ipv6 != nil {
-		err2 = s.ipv6.Close()
+		closeErrors = append(closeErrors, s.ipv6.Close())
 		s.ipv6 = nil
 		s.ipv6PC = nil
+	}
+	if s.fakeIPv4 != nil {
+		closeErrors = append(closeErrors, s.fakeIPv4.Close())
+		s.fakeIPv4 = nil
+		s.fakeIPv4PC = nil
+	}
+	if s.fakeIPv6 != nil {
+		closeErrors = append(closeErrors, s.fakeIPv6.Close())
+		s.fakeIPv6 = nil
+		s.fakeIPv6PC = nil
 	}
 	s.blackhole4 = false
 	s.blackhole6 = false
@@ -326,10 +427,11 @@ func (s *StdNetBind) Close() error {
 	s.ipv4RxOffload = false
 	s.ipv6TxOffload = false
 	s.ipv6RxOffload = false
-	if err1 != nil {
-		return err1
-	}
-	return err2
+	s.fakeTCPMu.Lock()
+	clear(s.fakeTCPStates)
+	s.fakeTCPLastClean = time.Time{}
+	s.fakeTCPMu.Unlock()
+	return errors.Join(closeErrors...)
 }
 
 type ErrUDPGSODisabled struct {
@@ -346,6 +448,13 @@ func (e ErrUDPGSODisabled) Unwrap() error {
 }
 
 func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
+	ep, ok := endpoint.(*StdNetEndpoint)
+	if !ok {
+		return ErrWrongEndpointType
+	}
+	if ep.Transport() == TransportFakeTCP {
+		return s.sendFakeTCPData(bufs, ep)
+	}
 	s.mu.Lock()
 	blackhole := s.blackhole4
 	conn := s.ipv4
@@ -381,14 +490,14 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 		ua.IP = ua.IP[:4]
 		copy(ua.IP, as4[:])
 	}
-	ua.Port = int(endpoint.(*StdNetEndpoint).Port())
+	ua.Port = int(ep.Port())
 	var (
 		retried bool
 		err     error
 	)
 retry:
 	if offload {
-		n := coalesceMessages(ua, endpoint.(*StdNetEndpoint), bufs, *msgs, setGSOSize)
+		n := coalesceMessages(ua, ep, bufs, *msgs, setGSOSize)
 		err = s.send(conn, br, (*msgs)[:n])
 		if err != nil && offload && errShouldDisableUDPGSO(err) {
 			offload = false
@@ -406,7 +515,7 @@ retry:
 		for i := range bufs {
 			(*msgs)[i].Addr = ua
 			(*msgs)[i].Buffers[0] = bufs[i]
-			setSrcControl(&(*msgs)[i].OOB, endpoint.(*StdNetEndpoint))
+			setSrcControl(&(*msgs)[i].OOB, ep)
 		}
 		err = s.send(conn, br, (*msgs)[:len(bufs)])
 	}

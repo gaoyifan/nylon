@@ -3,6 +3,7 @@ module github.com/encodeous/nylon
 go 1.26.3
 
 require (
+	github.com/cilium/ebpf v0.21.0
 	github.com/digineo/go-ping v1.2.0
 	github.com/dustin/go-broadcast v0.0.0-20211018055107-71439988bd91
 	github.com/encodeous/metric v0.0.0-20251111175231-f339c2f7c4bd

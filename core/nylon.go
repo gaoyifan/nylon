@@ -18,6 +18,7 @@ import (
 
 	"github.com/encodeous/nylon/perf"
 	"github.com/encodeous/nylon/polyamide/device"
+	"github.com/encodeous/nylon/polyamide/faketcp"
 	"github.com/encodeous/nylon/polyamide/tun"
 	"github.com/encodeous/nylon/state"
 	"github.com/encodeous/tint"
@@ -39,6 +40,8 @@ type Nylon struct {
 	AppliedSystem AppliedSystemState
 	PingBuf       *ttlcache.Cache[uint64, EpPing]
 	PeerMap       atomic.Pointer[map[state.NyPublicKey]state.NodeId]
+	// fakeTCPPeers is an immutable capability snapshot read by the dataplane.
+	fakeTCPPeers atomic.Pointer[map[state.NodeId]struct{}]
 
 	// NodeIdMap maps NodeId<->binary node id, refreshed on every central
 	// config apply. Read on the dataplane to encode and decode unicast
@@ -73,6 +76,7 @@ type Nylon struct {
 	wgUapi       net.Listener
 	Interface    string
 	Device       *device.Device
+	fakeTCP      *faketcp.Manager
 	lanDiscovery *lanDiscoveryService
 
 	// only used for debugging & tests
@@ -90,8 +94,13 @@ type AppliedSystemState struct {
 	Peers   map[state.NodeId]state.NyPublicKey
 }
 
-func NewNylon(ccfg state.CentralCfg, ncfg state.LocalCfg, logLevel slog.Level, configPath string, aux map[string]any, opts state.NylonOptions, tunables *state.RouterTunables) (*Nylon, error) {
+func NewNylon(ccfg state.CentralCfg, ncfg state.LocalCfg, logLevel slog.Level, configPath string, aux map[string]any, opts state.NylonOptions, tunables *state.RouterTunables) (_ *Nylon, retErr error) {
 	ctx, cancel := context.WithCancelCause(context.Background())
+	defer func() {
+		if retErr != nil {
+			cancel(retErr)
+		}
+	}()
 
 	dispatch := make(chan func() error, 128)
 
@@ -171,13 +180,28 @@ func NewNylon(ccfg state.CentralCfg, ncfg state.LocalCfg, logLevel slog.Level, c
 	return n, nil
 }
 
-func (n *Nylon) Init() error {
+func (n *Nylon) Init() (retErr error) {
 	n.Log.Debug("init nylon")
 
 	err := n.Trace.Init(n)
 	if err != nil {
 		return err
 	}
+	wireGuardInitialized := false
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		n.Cancel(retErr)
+		if wireGuardInitialized {
+			retErr = errors.Join(retErr, n.Cleanup())
+			return
+		}
+		if n.PingBuf != nil {
+			n.PingBuf.Stop()
+		}
+		retErr = errors.Join(retErr, n.CleanupRouter(), n.Trace.Cleanup())
+	}()
 	err = n.InitRouter()
 	if err != nil {
 		return err
@@ -210,6 +234,7 @@ func (n *Nylon) Init() error {
 	if err != nil {
 		return err
 	}
+	wireGuardInitialized = true
 
 	// endpoint probing
 	n.RepeatTask(func() error {
@@ -332,9 +357,11 @@ endLoop:
 }
 
 func (n *Nylon) Cleanup() error {
+	var cleanupErr error
 	if n.lanDiscovery != nil {
 		if err := n.lanDiscovery.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			n.Log.Error("failed to close LAN discovery", "error", err)
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	if n.PingBuf != nil {
@@ -344,8 +371,6 @@ func (n *Nylon) Cleanup() error {
 		ph.Stop()
 	}
 
-	n.CleanupRouter()
-	n.Trace.Cleanup()
-
-	return n.cleanupWireGuard()
+	cleanupErr = errors.Join(cleanupErr, n.CleanupRouter(), n.Trace.Cleanup(), n.cleanupWireGuard())
+	return cleanupErr
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/encodeous/nylon/polyamide/conn"
 	"github.com/encodeous/nylon/state"
 	"github.com/stretchr/testify/assert"
 )
@@ -154,7 +155,7 @@ func TestConfiguredEndpointsExpandsBindsAcrossMatchingEndpointFamilies(t *testin
 	}, []*state.DynamicEndpoint{
 		state.NewDynamicEndpoint("198.51.100.10:57175"),
 		state.NewDynamicEndpoint("[2001:db8::20]:57175"),
-	}, &tunables)
+	}, false, &tunables)
 
 	assert.Len(t, eps, 2)
 	assert.Equal(t, netip.MustParseAddr("192.0.2.10"), eps[0].AsNylonEndpoint().Bind.Source)
@@ -169,11 +170,123 @@ func TestConfiguredEndpointsUsesDefaultEndpointWhenNoBindsConfigured(t *testing.
 	eps := configuredEndpoints(nil, []*state.DynamicEndpoint{
 		state.NewDynamicEndpoint("198.51.100.10:57175"),
 		state.NewDynamicEndpoint("[2001:db8::20]:57175"),
-	}, &tunables)
+	}, false, &tunables)
 
 	assert.Len(t, eps, 2)
 	assert.False(t, eps[0].AsNylonEndpoint().Bind.Source.IsValid())
 	assert.False(t, eps[1].AsNylonEndpoint().Bind.Source.IsValid())
+}
+
+func TestConfiguredEndpointsAddsFakeTCPOnlyWhenEnabledAndInterfaceBound(t *testing.T) {
+	stubFamilyReachable(t, allFamiliesReachable)
+	tunables := state.DefaultRouterTunables()
+	binds := []state.LocalBind{
+		{Interface: "eth0"},
+		{Source: netip.MustParseAddr("192.0.2.10")},
+	}
+	endpoints := []*state.DynamicEndpoint{state.NewDynamicEndpoint("198.51.100.10:57175")}
+
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		want    []conn.Transport
+	}{
+		{name: "enabled", enabled: true, want: []conn.Transport{conn.TransportUDP, conn.TransportFakeTCP, conn.TransportUDP}},
+		{name: "disabled", want: []conn.Transport{conn.TransportUDP, conn.TransportUDP}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eps := configuredEndpoints(binds, endpoints, tc.enabled, &tunables)
+			transports := make([]conn.Transport, len(eps))
+			for i, ep := range eps {
+				transports[i] = ep.AsNylonEndpoint().Transport
+			}
+			assert.Equal(t, tc.want, transports)
+		})
+	}
+
+	withoutBinds := configuredEndpoints(nil, endpoints, true, &tunables)
+	assert.Len(t, withoutBinds, 1)
+	assert.Equal(t, conn.TransportUDP, withoutBinds[0].AsNylonEndpoint().Transport)
+}
+
+func TestReconcileConfiguredEndpointsHotUpdatesRemoteFakeTCPCapability(t *testing.T) {
+	stubFamilyReachable(t, allFamiliesReachable)
+	tunables := state.DefaultRouterTunables()
+	binds := []state.LocalBind{{Interface: "eth0"}}
+	endpoints := []*state.DynamicEndpoint{state.NewDynamicEndpoint("198.51.100.10:57175")}
+	neigh := &state.Neighbour{Eps: configuredEndpoints(binds, endpoints, false, &tunables)}
+	udp := neigh.Eps[0]
+
+	reconcileConfiguredEndpoints(neigh, configuredEndpoints(binds, endpoints, true, &tunables), true)
+	assert.Len(t, neigh.Eps, 2)
+	assert.Same(t, udp, neigh.Eps[0])
+	assert.Equal(t, conn.TransportFakeTCP, neigh.Eps[1].AsNylonEndpoint().Transport)
+
+	reconcileConfiguredEndpoints(neigh, configuredEndpoints(binds, endpoints, false, &tunables), false)
+	assert.Equal(t, []state.Endpoint{udp}, neigh.Eps)
+}
+
+func TestReconcileConfiguredEndpointsDropsRemoteFakeTCPWhenCapabilityIsDisabled(t *testing.T) {
+	tunables := state.DefaultRouterTunables()
+	udp := state.NewEndpoint(state.NewDynamicEndpoint("198.51.100.10:57175"), true, nil, &tunables)
+	fakeTCP := state.NewEndpoint(state.NewDynamicEndpoint("198.51.100.10:57175"), true, nil, &tunables)
+	fakeTCP.Transport = conn.TransportFakeTCP
+	neigh := &state.Neighbour{Eps: []state.Endpoint{udp, fakeTCP}}
+
+	reconcileConfiguredEndpoints(neigh, nil, false)
+
+	assert.Equal(t, []state.Endpoint{udp}, neigh.Eps)
+}
+
+func TestApplyCentralConfigLocalFakeTCPCapabilityChangeRequiresRestart(t *testing.T) {
+	current := state.CentralCfg{
+		Routers: []state.RouterCfg{
+			{NodeCfg: state.NodeCfg{Id: "a"}},
+			{NodeCfg: state.NodeCfg{Id: "b"}},
+		},
+		Graph: []string{"a, b"},
+	}
+	n := &Nylon{ConfigState: state.ConfigState{CentralCfg: current, LocalCfg: state.LocalCfg{Id: "a"}}}
+	next := current
+	next.Routers = append([]state.RouterCfg(nil), current.Routers...)
+	next.Routers[0].TCPObfuscation = true
+
+	result, err := n.ApplyCentralConfig(&next)
+
+	assert.Equal(t, ApplyRestartRequired, result)
+	assert.ErrorContains(t, err, "tcp_obfuscation")
+	assert.False(t, n.CentralCfg.GetRouter("a").TCPObfuscation)
+}
+
+func TestReconcileRouterStatePublishesMutualFakeTCPCapabilities(t *testing.T) {
+	tunables := state.DefaultRouterTunables()
+	n := &Nylon{
+		RouterTunables: tunables,
+		ConfigState:    state.ConfigState{LocalCfg: state.LocalCfg{Id: "a"}},
+		RouterState:    &state.RouterState{},
+	}
+	cfg := state.CentralCfg{
+		Routers: []state.RouterCfg{
+			{NodeCfg: state.NodeCfg{Id: "a"}, TCPObfuscation: true},
+			{NodeCfg: state.NodeCfg{Id: "b"}, TCPObfuscation: true},
+		},
+		Graph: []string{"a, b"},
+	}
+
+	assert.NoError(t, n.reconcileRouterState(&cfg))
+	peers := n.fakeTCPPeers.Load()
+	if assert.NotNil(t, peers) {
+		_, ok := (*peers)["b"]
+		assert.True(t, ok)
+	}
+
+	cfg.Routers[1].TCPObfuscation = false
+	assert.NoError(t, n.reconcileRouterState(&cfg))
+	peers = n.fakeTCPPeers.Load()
+	if assert.NotNil(t, peers) {
+		_, ok := (*peers)["b"]
+		assert.False(t, ok)
+	}
 }
 
 func TestConfiguredEndpointsSkipsFamiliesWithoutRoute(t *testing.T) {
@@ -184,7 +297,7 @@ func TestConfiguredEndpointsSkipsFamiliesWithoutRoute(t *testing.T) {
 	eps := configuredEndpoints(nil, []*state.DynamicEndpoint{
 		state.NewDynamicEndpoint("198.51.100.10:57175"),
 		state.NewDynamicEndpoint("[2001:db8::20]:57175"),
-	}, &tunables)
+	}, false, &tunables)
 	assert.Len(t, eps, 1)
 	assert.Equal(t, "198.51.100.10:57175", eps[0].AsNylonEndpoint().DynEP.Value)
 
@@ -194,7 +307,7 @@ func TestConfiguredEndpointsSkipsFamiliesWithoutRoute(t *testing.T) {
 	}, []*state.DynamicEndpoint{
 		state.NewDynamicEndpoint("198.51.100.10:57175"),
 		state.NewDynamicEndpoint("[2001:db8::20]:57175"),
-	}, &tunables)
+	}, false, &tunables)
 	assert.Len(t, eps, 1)
 	assert.Equal(t, "198.51.100.10:57175", eps[0].AsNylonEndpoint().DynEP.Value)
 
@@ -204,7 +317,7 @@ func TestConfiguredEndpointsSkipsFamiliesWithoutRoute(t *testing.T) {
 		{Source: netip.MustParseAddr("2001:db8::10")},
 	}, []*state.DynamicEndpoint{
 		state.NewDynamicEndpoint("[2001:db8::20]:57175"),
-	}, &tunables)
+	}, false, &tunables)
 	assert.Len(t, eps, 1)
 }
 

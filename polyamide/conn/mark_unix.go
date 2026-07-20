@@ -8,6 +8,7 @@
 package conn
 
 import (
+	"net"
 	"runtime"
 
 	"golang.org/x/sys/unix"
@@ -27,30 +28,18 @@ func init() {
 }
 
 func (s *StdNetBind) SetMark(mark uint32) error {
-	var operr error
 	if fwmarkIoctl == 0 {
 		return nil
 	}
-	if s.ipv4 != nil {
-		fd, err := s.ipv4.SyscallConn()
+	for _, conn := range []*net.UDPConn{s.ipv4, s.ipv6, s.fakeIPv4, s.fakeIPv6} {
+		if conn == nil {
+			continue
+		}
+		fd, err := conn.SyscallConn()
 		if err != nil {
 			return err
 		}
-		err = fd.Control(func(fd uintptr) {
-			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
-		})
-		if err == nil {
-			err = operr
-		}
-		if err != nil {
-			return err
-		}
-	}
-	if s.ipv6 != nil {
-		fd, err := s.ipv6.SyscallConn()
-		if err != nil {
-			return err
-		}
+		var operr error
 		err = fd.Control(func(fd uintptr) {
 			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
 		})

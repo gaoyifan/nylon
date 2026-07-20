@@ -47,6 +47,18 @@ func NodeConfigValidator(central *CentralCfg, node *LocalCfg) error {
 			return err
 		}
 	}
+	tcpObfuscation := false
+	if central != nil {
+		idx := slices.IndexFunc(central.Routers, func(router RouterCfg) bool {
+			return router.Id == node.Id
+		})
+		if idx != -1 {
+			tcpObfuscation = central.Routers[idx].TCPObfuscation
+		}
+	}
+	if tcpObfuscation && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		return fmt.Errorf("tcp_obfuscation requires linux on amd64 or arm64")
+	}
 	seenBinds := make(map[LocalBind]struct{})
 	for _, bind := range node.Binds {
 		if bind.Interface == "" && !bind.Source.IsValid() {
@@ -59,6 +71,11 @@ func NodeConfigValidator(central *CentralCfg, node *LocalCfg) error {
 		if runtime.GOOS != "linux" {
 			return fmt.Errorf("local binds are only supported on linux")
 		}
+	}
+	if tcpObfuscation && !slices.ContainsFunc(node.Binds, func(bind LocalBind) bool {
+		return bind.Interface != ""
+	}) {
+		return fmt.Errorf("tcp_obfuscation requires at least one bind with an interface")
 	}
 	if len(node.LANDiscovery) != 0 {
 		if runtime.GOOS != "linux" {

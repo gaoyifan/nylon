@@ -90,6 +90,9 @@ func TestIPCStatus(t *testing.T) {
 	require.NotEmpty(t, peer.GetEndpoints())
 	assert.GreaterOrEqual(t, len(peer.GetEndpoints()), 2)
 	assert.NotEmpty(t, peer.GetEndpoints()[0].Address)
+	for _, endpoint := range peer.GetEndpoints() {
+		assert.Equal(t, protocol.EndpointTransport_UDP, endpoint.GetTransport())
+	}
 
 	assert.GreaterOrEqual(t, len(s.GetRoutes().GetSelected()), 1)
 	assert.GreaterOrEqual(t, len(s.GetRoutes().GetForward()), 1)

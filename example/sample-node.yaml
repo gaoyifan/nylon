@@ -1,14 +1,19 @@
 key: 0NcrMcaS1tORCTA88L5ZPE+H6yUMV4e5vRp6iypnPW8=
 id: alice
-port: 57175 # Default: 57175 - UDP port that Nylon listens on
+port: 57175 # Required local data port; 57175 is conventional; fake-TCP emits TCP-shaped packets on it
 
 # the following are optional
 use_system_routing: false # Default: false - all packets from peers will come out of the TUN interface
-no_net_configure: false # Default: false - do not configure system networking at all
+no_net_configure: false # Skip normal route/address setup; tcp_obfuscation still attaches TCX
 log_path: "" # Default: "" - If set, Nylon will log to this file
 interface_name: "" # Default: "" - If set, Nylon will use this interface name instead of the default "nylon" or utunx on macOS
-mtu: 0 # Default: 0 (= 1420) - MTU of the nylon interface. Keep it consistent across the mesh; remember multi-hop paths pay the MPLS label overhead on top
+mtu: 0 # Default: 0 (= 1408) - MTU of the nylon interface. Keep it consistent across the mesh; remember multi-hop paths pay the MPLS label overhead on top
 dns_resolvers: [] # Default: [] - If set (e.g ["1.1.1.1:53"]), nylon will use these DNS resolvers for its own queries
+# If central.yaml enables tcp_obfuscation for this router, it requires
+# non-Android Linux 6.6+ on amd64/arm64 and a named-interface bind here.
+# UDP remains available; source-only binds and LAN-discovered candidates remain UDP-only.
+# binds:
+#   - interface: eth0
 # Optional Linux-only signed IPv4 subnet-broadcast discovery for graph neighbours on the same LAN.
 # Uses link-scoped UDP 57176 only for announcements; WireGuard traffic stays on `port`.
 # lan_discovery:

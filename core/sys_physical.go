@@ -3,6 +3,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -12,6 +13,9 @@ import (
 	"github.com/encodeous/nylon/polyamide/device"
 	"github.com/encodeous/nylon/polyamide/tun"
 )
+
+var createWireGuardTUN = tun.CreateTUN
+var initWireGuardUAPI = InitUAPI
 
 func NewWireGuardDevice(n *Nylon) (dev *device.Device, tunDevice tun.Device, realItf string, err error) {
 	itfName := n.InterfaceName // attempt to name the interface
@@ -25,7 +29,7 @@ func NewWireGuardDevice(n *Nylon) (dev *device.Device, tunDevice tun.Device, rea
 		mtu = device.DefaultMTU
 	}
 
-	tdev, err := tun.CreateTUN(itfName, mtu)
+	tdev, err := createWireGuardTUN(itfName, mtu)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("failed to create TUN: %v. Check if an interface with the name nylon exists already", err)
 	}
@@ -37,7 +41,35 @@ func NewWireGuardDevice(n *Nylon) (dev *device.Device, tunDevice tun.Device, rea
 	wgLog := n.Log.With("module", log.ScopePolyamide)
 
 	// setup WireGuard
-	dev = device.NewDevice(tdev, conn.NewDefaultBind(), &device.Logger{
+	bind := conn.NewDefaultBind()
+	defer func() {
+		if err == nil {
+			return
+		}
+		if n.wgUapi != nil {
+			err = errors.Join(err, n.wgUapi.Close())
+			n.wgUapi = nil
+		}
+		err = errors.Join(err, bind.Close(), tdev.Close())
+	}()
+
+	if n.CentralCfg.IsRouter(n.LocalCfg.Id) && n.GetRouter(n.LocalCfg.Id).TCPObfuscation {
+		stdBind, ok := bind.(*conn.StdNetBind)
+		if !ok {
+			return nil, nil, "", fmt.Errorf("tcp_obfuscation requires the standard network bind")
+		}
+		if err := stdBind.EnableFakeTCP(n.LinkDeadThreshold); err != nil {
+			return nil, nil, "", err
+		}
+	}
+	// Start UAPI before the device, so every fallible acquisition is complete
+	// before NewDevice starts its worker goroutines.
+	n.wgUapi, err = initWireGuardUAPI(n.Log, itfName)
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	dev = device.NewDevice(tdev, bind, &device.Logger{
 		Verbosef: func(format string, args ...any) {
 			if n.DBG_log_wireguard {
 				wgLog.Debug(fmt.Sprintf(format, args...))
@@ -51,19 +83,14 @@ func NewWireGuardDevice(n *Nylon) (dev *device.Device, tunDevice tun.Device, rea
 		},
 	})
 
-	// start uapi for wg command
-	n.wgUapi, err = InitUAPI(n.Log, itfName)
-	if err != nil {
-		return nil, nil, "", err
-	}
-
 	if n.wgUapi != nil {
+		uapi := n.wgUapi
 		go func() {
-			for n.Context.Err() == nil {
-				accept, err := n.wgUapi.Accept()
+			for {
+				accept, err := uapi.Accept()
 				if err != nil {
 					n.Log.Debug(err.Error())
-					continue
+					return
 				}
 				go dev.IpcHandle(accept)
 			}
@@ -72,15 +99,4 @@ func NewWireGuardDevice(n *Nylon) (dev *device.Device, tunDevice tun.Device, rea
 
 	n.Log.Info("Created WireGuard interface", "name", itfName)
 	return dev, tdev, itfName, nil
-}
-
-func CleanupWireGuardDevice(n *Nylon) error {
-	n.Device.Close()
-	if n.wgUapi != nil {
-		err := n.wgUapi.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }

@@ -184,6 +184,19 @@ lan_discovery:
 	assert.Equal(t, []string{"eth0", "wlan0"}, local.LANDiscovery)
 }
 
+func TestRouterTCPObfuscationYAML(t *testing.T) {
+	var central CentralCfg
+	err := yaml.Unmarshal([]byte(`
+routers:
+  - id: alice
+    tcp_obfuscation: true
+`), &central)
+	assert.NoError(t, err)
+	if assert.Len(t, central.Routers, 1) {
+		assert.True(t, central.Routers[0].TCPObfuscation)
+	}
+}
+
 func TestNodeConfigValidatorRejectsSelectorlessBind(t *testing.T) {
 	local := LocalCfg{
 		Id:    "alice",
@@ -209,4 +222,40 @@ func TestNodeConfigValidatorAllowsBind(t *testing.T) {
 
 	err := NodeConfigValidator(nil, &local)
 	assert.NoError(t, err)
+}
+
+func TestNodeConfigValidatorTCPObfuscation(t *testing.T) {
+	supported := runtime.GOOS == "linux" && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64")
+	central := CentralCfg{Routers: []RouterCfg{{
+		NodeCfg:        NodeCfg{Id: "alice"},
+		TCPObfuscation: true,
+	}}}
+	local := LocalCfg{
+		Id:   "alice",
+		Key:  [32]byte{1},
+		Port: 57175,
+	}
+
+	err := NodeConfigValidator(&central, &local)
+	if supported {
+		assert.ErrorContains(t, err, "requires at least one bind with an interface")
+	} else {
+		assert.ErrorContains(t, err, "requires linux on amd64 or arm64")
+	}
+
+	local.Binds = []LocalBind{{Source: netip.MustParseAddr("203.0.113.10")}}
+	err = NodeConfigValidator(&central, &local)
+	if supported {
+		assert.ErrorContains(t, err, "requires at least one bind with an interface")
+	} else {
+		assert.ErrorContains(t, err, "requires linux on amd64 or arm64")
+	}
+
+	local.Binds = []LocalBind{{Interface: "eth0"}}
+	err = NodeConfigValidator(&central, &local)
+	if supported {
+		assert.NoError(t, err)
+	} else {
+		assert.ErrorContains(t, err, "requires linux on amd64 or arm64")
+	}
 }

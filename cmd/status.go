@@ -233,7 +233,7 @@ func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, full bo
 			break
 		}
 	}
-	headers := []string{"address", "resolved"}
+	headers := []string{"address", "resolved", "transport"}
 	if showBind {
 		headers = append(headers, "bind")
 	}
@@ -247,7 +247,8 @@ func printEndpoints(p paletteValues, endpoints []*protocol.EndpointInfo, full bo
 		if ep.Resolved != nil {
 			resolved = *ep.Resolved
 		}
-		row := []string{ep.Address, resolved}
+		transport := strings.ToLower(strings.ReplaceAll(ep.Transport.String(), "_", "-"))
+		row := []string{ep.Address, resolved, transport}
 		if showBind {
 			bind := endpointBind(ep)
 			if bind == "" {
