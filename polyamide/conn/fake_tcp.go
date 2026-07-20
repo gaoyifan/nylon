@@ -369,7 +369,7 @@ func (s *StdNetBind) sendFakeTCPData(bufs [][]byte, ep *StdNetEndpoint) error {
 		s.fakeTCPMu.Unlock()
 		return ErrFakeTCPNotEstablished
 	}
-	packets := make([]fakeTCPPacket, len(bufs))
+	var packets [IdealBatchSize]fakeTCPPacket
 	for i, buf := range bufs {
 		packets[i] = fakeTCPPacket{
 			flags:   faketcp.TCPFlagACK,
@@ -381,7 +381,7 @@ func (s *StdNetBind) sendFakeTCPData(bufs [][]byte, ep *StdNetEndpoint) error {
 	}
 	flow.receivedUnacked = 0
 	s.fakeTCPMu.Unlock()
-	return s.sendFakeTCPPackets(ep, packets)
+	return s.sendFakeTCPPackets(ep, packets[:len(bufs)])
 }
 
 func (s *StdNetBind) receiveFakeTCP(carrier []byte, ep *StdNetEndpoint) ([]byte, int, bool) {
