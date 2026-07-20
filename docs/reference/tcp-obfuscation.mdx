@@ -127,6 +127,41 @@ packet carrier, not a byte-stream connection. See
 The host has no TCP listener for this feature. Configure upstream policy from
 the on-wire TCP and UDP headers.
 
+## Performance tuning
+
+Linux connection tracking adds work to every carrier packet even though Nylon
+does not use conntrack state. On a host where Nylon's UDP port is dedicated to
+Nylon, the carrier can bypass conntrack in both directions:
+
+```nft
+table inet nylon_raw {
+  chain output {
+    type filter hook output priority raw; policy accept;
+    udp sport 57175 notrack
+  }
+
+  chain prerouting {
+    type filter hook prerouting priority raw; policy accept;
+    udp dport 57175 notrack
+  }
+}
+```
+
+Merge these rules into existing raw-priority chains when present. Inbound
+`notrack` must run in `prerouting`; an `input` rule runs after conntrack and
+does not avoid its cost. These rules apply to both Nylon transports on the
+configured port and may change the behaviour of a stateful host firewall, so
+add explicit stateless allow rules when that firewall previously depended on
+conntrack state. Do not use `notrack` when host-side NAT must translate the
+carrier.
+
+Single-queue virtual NICs can also become CPU-local bottlenecks. Check the NIC
+IRQ placement in `/proc/interrupts` and keep the Nylon process off a busy
+virtio input or output IRQ CPU when enough other CPUs remain. For a systemd
+service this can be expressed with `CPUAffinity=`. Do not reduce Nylon to only
+one or two CPUs merely to isolate an IRQ: that can cost more throughput than
+the isolation saves.
+
 ## How it works
 
 Nylon opens a separate UDP carrier socket for each available address family.
