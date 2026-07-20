@@ -120,6 +120,23 @@ func TestFakeTCPCarrierEncoding(t *testing.T) {
 	}
 }
 
+func TestFakeTCPCarrierEncodingReusesPayloadCapacity(t *testing.T) {
+	payload := make([]byte, 3, 32)
+	copy(payload, []byte{0x01, 0x02, 0x03})
+	carrier := marshalFakeTCPPacket(fakeTCPPacket{
+		flags:   faketcp.TCPFlagACK,
+		seq:     1,
+		ack:     2,
+		payload: payload,
+	})
+	if &carrier[0] != &payload[0] {
+		t.Fatal("carrier did not reuse payload storage")
+	}
+	if got := carrier[faketcp.CarrierHeaderSize+faketcp.FrameHeaderSize:]; !bytes.Equal(got, []byte{0x01, 0x02, 0x03}) {
+		t.Fatalf("payload = %x", got)
+	}
+}
+
 func TestFakeTCPActivePassiveHandshakeAndData(t *testing.T) {
 	now := time.Now()
 	a := &StdNetBind{fakeTCPStates: make(map[fakeTCPFlowKey]*fakeTCPFlow)}

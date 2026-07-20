@@ -301,11 +301,20 @@ func marshalFakeTCPPacket(packet fakeTCPPacket) []byte {
 	} else if len(packet.payload) > 0 {
 		length += faketcp.FrameHeaderSize
 	}
-	carrier := make([]byte, length)
+	var carrier []byte
+	// WireGuard relinquishes its oversized message buffer after Send.
+	if len(packet.payload) > 0 && cap(packet.payload) >= length {
+		carrier = packet.payload[:length]
+		copy(carrier[faketcp.CarrierHeaderSize+faketcp.FrameHeaderSize:], packet.payload)
+	} else {
+		carrier = make([]byte, length)
+		if len(packet.payload) > 0 {
+			copy(carrier[faketcp.CarrierHeaderSize+faketcp.FrameHeaderSize:], packet.payload)
+		}
+	}
 	binary.BigEndian.PutUint16(carrier[0:2], faketcp.CarrierMagic)
 	if len(packet.payload) > 0 {
 		binary.BigEndian.PutUint16(carrier[faketcp.CarrierHeaderSize:], uint16(len(packet.payload)))
-		copy(carrier[faketcp.CarrierHeaderSize+faketcp.FrameHeaderSize:], packet.payload)
 		binary.BigEndian.PutUint16(carrier[2:4], faketcp.FoldPayloadChecksum(carrier[faketcp.CarrierHeaderSize:]))
 	} else {
 		carrier[3] = packet.flags
