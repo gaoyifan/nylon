@@ -14,8 +14,10 @@ import (
 )
 
 func TestFakeTCPSocketsAndPrepareRetry(t *testing.T) {
+	const staleAfter = time.Minute
+
 	bind := NewStdNetBind().(*StdNetBind)
-	if err := bind.EnableFakeTCP(time.Minute); err != nil {
+	if err := bind.EnableFakeTCP(staleAfter); err != nil {
 		t.Fatal(err)
 	}
 	fns, port, err := bind.Open(0)
@@ -56,11 +58,23 @@ func TestFakeTCPSocketsAndPrepareRetry(t *testing.T) {
 		t.Fatalf("first Prepare error = %v", err)
 	}
 	key := fakeTCPKey(ep)
-	firstISN := bind.fakeTCPStates[key].sendNext - 1
+	flow := bind.fakeTCPStates[key]
+	firstISN := flow.sendNext - 1
+	retryInterval := staleAfter/2 + time.Second
+	flow.lastSeen = flow.lastSeen.Add(-retryInterval)
+	bind.fakeTCPLastClean = time.Time{}
 	if err := bind.PrepareFakeTCP(ep); !errors.Is(err, ErrFakeTCPNotEstablished) {
 		t.Fatalf("retry Prepare error = %v", err)
 	}
-	if retryISN := bind.fakeTCPStates[key].sendNext - 1; retryISN != firstISN {
+	flow.lastSeen = flow.lastSeen.Add(-retryInterval)
+	bind.fakeTCPLastClean = time.Time{}
+	if err := bind.PrepareFakeTCP(ep); !errors.Is(err, ErrFakeTCPNotEstablished) {
+		t.Fatalf("second retry Prepare error = %v", err)
+	}
+	if bind.fakeTCPStates[key] != flow {
+		t.Fatal("active SYN retries replaced the half-open flow")
+	}
+	if retryISN := flow.sendNext - 1; retryISN != firstISN {
 		t.Fatalf("SYN retry changed ISN from %d to %d", firstISN, retryISN)
 	}
 }

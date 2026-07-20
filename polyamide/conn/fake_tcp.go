@@ -119,10 +119,10 @@ func (s *StdNetBind) PrepareFakeTCP(ep *StdNetEndpoint) error {
 		flow = &fakeTCPFlow{
 			state:    fakeTCPSYNSent,
 			sendNext: fakeTCPRandomISN() + 1,
-			lastSeen: now,
 		}
 		s.fakeTCPStates[key] = flow
 	}
+	flow.lastSeen = now
 	packet := fakeTCPPacket{
 		flags: faketcp.TCPFlagSYN,
 		seq:   flow.sendNext - 1,
