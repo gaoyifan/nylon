@@ -118,7 +118,7 @@ func TestTransformerPrograms(t *testing.T) {
 			if action != tcxNext {
 				t.Fatalf("ingress action = %d, want TCX_NEXT", action)
 			}
-			assertInboundUDPCarrier(t, udpPacket, test.version, sequence, test.ack, test.flags, test.trailer)
+			assertInboundUDPCarrier(t, udpPacket, test.version, sequence, test.ack, test.flags, test.trailer, false)
 		})
 	}
 
@@ -157,7 +157,37 @@ func TestTransformerPrograms(t *testing.T) {
 			t.Fatalf("ingress action = %d, want TCX_NEXT", action)
 		}
 		assertInboundUDPCarrier(t, run.DataOut, 4, sequence, 0x50607080,
-			TCPFlagACK, framed)
+			TCPFlagACK, framed, true)
+	})
+
+	t.Run("corrupted TCP carrier", func(t *testing.T) {
+		trailer := testFakeTCPFrame(bytes.Repeat([]byte{0xab}, MinFramePayloadSize))
+		carrier := testCarrierFrame(4, testManagedPort, 0x10203040, 0x50607080,
+			TCPFlagACK, trailer)
+		_, tcpPacket, err := objects.FakeTcpEgress.Test(carrier)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tcpPacket = reverseTCPDirection(t, tcpPacket, 4)
+		tcpPacket[len(tcpPacket)-1] ^= 1
+
+		action, udpPacket, err := objects.FakeTcpIngress.Test(tcpPacket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if action != tcxNext {
+			t.Fatalf("ingress action = %d, want TCX_NEXT", action)
+		}
+		l4Offset, protocol := testL4OffsetAndProtocol(t, udpPacket, 4)
+		if protocol != 17 {
+			t.Fatalf("IP protocol = %d, want UDP", protocol)
+		}
+		if checksum := binary.BigEndian.Uint16(udpPacket[l4Offset+6 : l4Offset+8]); checksum == 0 {
+			t.Fatal("corrupted single-segment carrier has a zero UDP checksum")
+		}
+		if checksum := transportChecksum(udpPacket); checksum == 0 {
+			t.Fatal("corrupted TCP carrier became a valid UDP datagram")
+		}
 	})
 
 	t.Run("ordinary UDP with magic", func(t *testing.T) {
@@ -317,7 +347,7 @@ func assertTCPPacket(t *testing.T, packet []byte, version int, sequence, acknowl
 	assertIPv4Checksum(t, packet, version)
 }
 
-func assertInboundUDPCarrier(t *testing.T, packet []byte, version int, sequence, acknowledgement uint32, flags uint8, trailer []byte) {
+func assertInboundUDPCarrier(t *testing.T, packet []byte, version int, sequence, acknowledgement uint32, flags uint8, trailer []byte, zeroChecksum bool) {
 	t.Helper()
 	l4Offset, protocol := testL4OffsetAndProtocol(t, packet, version)
 	if protocol != 17 {
@@ -332,8 +362,12 @@ func assertInboundUDPCarrier(t *testing.T, packet []byte, version int, sequence,
 	if got, want := binary.BigEndian.Uint16(packet[l4Offset+4:l4Offset+6]), len(packet)-l4Offset; int(got) != want {
 		t.Fatalf("UDP length = %d, want %d", got, want)
 	}
-	if got := binary.BigEndian.Uint16(packet[l4Offset+6 : l4Offset+8]); got != 0 {
-		t.Fatalf("UDP checksum = %#x, want 0", got)
+	checksum := binary.BigEndian.Uint16(packet[l4Offset+6 : l4Offset+8])
+	if zeroChecksum && checksum != 0 {
+		t.Fatalf("UDP checksum = %#x, want 0", checksum)
+	}
+	if !zeroChecksum && checksum == 0 {
+		t.Fatal("UDP checksum is zero")
 	}
 	if got := binary.BigEndian.Uint16(packet[l4Offset+8 : l4Offset+10]); got != CarrierMagic {
 		t.Fatalf("carrier magic = %#x, want %#x", got, CarrierMagic)
@@ -349,6 +383,11 @@ func assertInboundUDPCarrier(t *testing.T, packet []byte, version int, sequence,
 	}
 	if !bytes.Equal(packet[l4Offset+20:], trailer) {
 		t.Fatalf("carrier trailer = %x, want %x", packet[l4Offset+20:], trailer)
+	}
+	if !zeroChecksum {
+		if got := transportChecksum(packet); got != 0 {
+			t.Fatalf("UDP checksum verification = %#x, want 0", got)
+		}
 	}
 	assertIPv4Checksum(t, packet, version)
 }

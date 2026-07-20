@@ -307,7 +307,7 @@ func TestReceiveFakeTCPDeliversDataWhenACKSendFails(t *testing.T) {
 		receivedUnacked: fakeTCPStandaloneACKAfter - 3,
 		lastSeen:        time.Now(),
 	}
-	payload := []byte{1}
+	payload := bytes.Repeat([]byte{1}, faketcp.MinFramePayloadSize)
 	carrier := marshalFakeTCPPacket(fakeTCPPacket{seq: 20, payload: payload})
 	binary.BigEndian.PutUint16(carrier[2:4], uint16(faketcp.TCPFlagACK))
 
@@ -320,8 +320,8 @@ func TestReceiveFakeTCPDeliversDataWhenACKSendFails(t *testing.T) {
 
 func TestReceiveFakeTCPAggregateAndMalformedFraming(t *testing.T) {
 	remote := netip.MustParseAddrPort("192.0.2.1:51820")
-	first := []byte{0x01, 0x02, 0x03}
-	second := []byte("a longer WireGuard datagram")
+	first := bytes.Repeat([]byte{0x01}, faketcp.MinFramePayloadSize)
+	second := bytes.Repeat([]byte{0x02}, faketcp.MinFramePayloadSize+7)
 	framed := frameFakeTCPPayload(first, second)
 	bind := &StdNetBind{fakeTCPStates: make(map[fakeTCPFlowKey]*fakeTCPFlow)}
 	ep := &StdNetEndpoint{AddrPort: remote}
@@ -351,7 +351,8 @@ func TestReceiveFakeTCPAggregateAndMalformedFraming(t *testing.T) {
 		{name: "truncated length", framed: []byte{0x00}},
 		{name: "zero length", framed: []byte{0x00, 0x00}},
 		{name: "truncated payload", framed: []byte{0x00, 0x02, 0xaa}},
-		{name: "trailing byte", framed: append(frameFakeTCPPayload([]byte{0xaa}), 0x00)},
+		{name: "undersized payload", framed: frameFakeTCPPayload(make([]byte, faketcp.MinFramePayloadSize-1))},
+		{name: "trailing byte", framed: append(frameFakeTCPPayload(make([]byte, faketcp.MinFramePayloadSize)), 0x00)},
 	}
 	for _, tt := range malformed {
 		t.Run(tt.name, func(t *testing.T) {
@@ -384,9 +385,9 @@ func TestReceiveFakeTCPAggregateAndMalformedFraming(t *testing.T) {
 func TestReceiveIPSplitsFakeTCPAggregate(t *testing.T) {
 	remote := netip.MustParseAddrPort("192.0.2.1:51820")
 	payloads := [][]byte{
-		{0x01},
-		[]byte("unequal second datagram"),
-		{0x03, 0x04, 0x05, 0x06},
+		bytes.Repeat([]byte{0x01}, faketcp.MinFramePayloadSize),
+		bytes.Repeat([]byte{0x02}, faketcp.MinFramePayloadSize+7),
+		bytes.Repeat([]byte{0x03}, faketcp.MinFramePayloadSize+3),
 	}
 	framed := frameFakeTCPPayload(payloads...)
 	bind := NewStdNetBind().(*StdNetBind)
@@ -431,7 +432,11 @@ func TestReceiveIPSplitsFakeTCPAggregate(t *testing.T) {
 
 func TestReceiveIPDefersFakeTCPAggregateBeyondCapacity(t *testing.T) {
 	remote := netip.MustParseAddrPort("192.0.2.1:51820")
-	payloads := [][]byte{{1}, {2, 3}, {4, 5, 6}}
+	payloads := [][]byte{
+		bytes.Repeat([]byte{1}, faketcp.MinFramePayloadSize),
+		bytes.Repeat([]byte{2}, faketcp.MinFramePayloadSize+1),
+		bytes.Repeat([]byte{3}, faketcp.MinFramePayloadSize+2),
+	}
 	framed := frameFakeTCPPayload(payloads...)
 	bind := NewStdNetBind().(*StdNetBind)
 	ep := &StdNetEndpoint{AddrPort: remote}
@@ -474,8 +479,62 @@ func TestReceiveIPDefersFakeTCPAggregateBeyondCapacity(t *testing.T) {
 	}
 }
 
+func TestReceiveIPDefersIntoHeterogeneousBuffers(t *testing.T) {
+	remote := netip.MustParseAddrPort("192.0.2.1:51820")
+	payloads := [][]byte{
+		bytes.Repeat([]byte{1}, faketcp.MinFramePayloadSize),
+		bytes.Repeat([]byte{2}, faketcp.MinFramePayloadSize+1),
+	}
+	framed := frameFakeTCPPayload(payloads...)
+	bind := NewStdNetBind().(*StdNetBind)
+	ep := &StdNetEndpoint{AddrPort: remote}
+	bind.fakeTCPStates = map[fakeTCPFlowKey]*fakeTCPFlow{
+		fakeTCPKey(ep): {state: fakeTCPEstablished, sendNext: 10, recvNext: 20, lastSeen: time.Now()},
+	}
+	addr := net.UDPAddrFromAddrPort(remote)
+	reader := fakeTCPBatchReader{inputs: []fakeTCPBatchInput{
+		{data: fakeTCPInboundCarrier(20, nil), addr: addr},
+		{data: fakeTCPInboundCarrier(20, framed), addr: addr},
+	}}
+	var pending fakeTCPPending
+	bufs := [][]byte{make([]byte, faketcp.CarrierHeaderSize), make([]byte, 128), make([]byte, 64)}
+	sizes := make([]int, len(bufs))
+	eps := make([]Endpoint, len(bufs))
+
+	n, err := bind.receiveIP(&reader, nil, false, true, &pending, bufs, sizes, eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || sizes[0] != 0 {
+		t.Fatalf("first read = n %d, size %d; want one empty slot", n, sizes[0])
+	}
+
+	n, err = bind.receiveIP(&reader, nil, false, true, &pending, bufs, sizes, eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(bufs) || sizes[0] != 0 {
+		t.Fatalf("pending read = n %d, sizes %v; want a preserved short-buffer hole", n, sizes)
+	}
+	for i, want := range payloads {
+		if !bytes.Equal(bufs[i+1][:sizes[i+1]], want) {
+			t.Fatalf("pending datagram %d = %x, want %x", i, bufs[i+1][:sizes[i+1]], want)
+		}
+	}
+	if eps[1] != eps[2] {
+		t.Fatal("pending aggregate frames have different endpoints")
+	}
+	if reader.reads != 1 {
+		t.Fatalf("socket reads = %d, want 1", reader.reads)
+	}
+}
+
 func TestFakeTCPPendingOwnsEndpoint(t *testing.T) {
-	payloads := [][]byte{{1}, {2}}
+	payloads := [][]byte{
+		bytes.Repeat([]byte{1}, faketcp.MinFramePayloadSize),
+		bytes.Repeat([]byte{2}, faketcp.MinFramePayloadSize),
+		bytes.Repeat([]byte{3}, faketcp.MinFramePayloadSize),
+	}
 	ep := fakeTCPEndpoint("192.0.2.1:51820")
 	ep.src = []byte{3, 4}
 	var pending fakeTCPPending
@@ -483,20 +542,23 @@ func TestFakeTCPPendingOwnsEndpoint(t *testing.T) {
 
 	ep.SetTransport(TransportUDP)
 	ep.src[0] = 5
-	bufs := [][]byte{make([]byte, 8)}
-	sizes := make([]int, 1)
-	eps := make([]Endpoint, 1)
-	if n := pending.receive(bufs, sizes, eps); n != 1 {
-		t.Fatalf("first pending receive = %d, want 1", n)
+	bufs := [][]byte{make([]byte, 64), make([]byte, 64)}
+	sizes := make([]int, 2)
+	eps := make([]Endpoint, 2)
+	if n := pending.receive(bufs, sizes, eps); n != 2 {
+		t.Fatalf("first pending receive = %d, want 2", n)
 	}
 	firstEP := eps[0].(*StdNetEndpoint)
 	if firstEP.Transport() != TransportFakeTCP || !bytes.Equal(firstEP.src, []byte{3, 4}) {
 		t.Fatalf("first pending endpoint = %#v", firstEP)
 	}
+	if eps[1] != eps[0] {
+		t.Fatal("frames returned by one pending receive have different endpoints")
+	}
 	firstEP.SetTransport(TransportUDP)
 	firstEP.src[0] = 6
 
-	if n := pending.receive(bufs, sizes, eps); n != 1 {
+	if n := pending.receive(bufs[:1], sizes[:1], eps[:1]); n != 1 {
 		t.Fatalf("second pending receive = %d, want 1", n)
 	}
 	secondEP := eps[0].(*StdNetEndpoint)
@@ -532,8 +594,8 @@ func TestReceiveIPDoesNotDrainPendingAfterClose(t *testing.T) {
 
 func TestReceiveIPCompactsMixedFakeTCPBatch(t *testing.T) {
 	remote := netip.MustParseAddrPort("192.0.2.1:51820")
-	first := []byte{1, 2, 3}
-	second := []byte("second framed datagram")
+	first := bytes.Repeat([]byte{1}, faketcp.MinFramePayloadSize)
+	second := bytes.Repeat([]byte{2}, faketcp.MinFramePayloadSize+5)
 	framed := frameFakeTCPPayload(first, second)
 	bind := NewStdNetBind().(*StdNetBind)
 	ep := &StdNetEndpoint{AddrPort: remote}

@@ -22,8 +22,8 @@ Each participating router needs:
 - `tcp_obfuscation: true` in its router entry in `central.yaml`.
 - At least one named-interface `bind` in its own `node.yaml`.
 - Permission to load eBPF programs and attach TCX programs to that interface.
-- The separate ethtool feature `rx-gro-list` left at its Linux default of off.
-  Interface LRO and hardware GRO may remain enabled.
+- `rx-gro-list` disabled on each named bind interface, as described in
+  [Check rx-gro-list](#check-rx-gro-list).
 
 For every published endpoint, UDP and TCP must use the same public port number.
 `port` is required in `node.yaml`; `57175` is only the conventional value. A
@@ -101,6 +101,20 @@ attachment are checked when Nylon starts. Changing the local router's
 
 `no_net_configure: true` does not disable this attachment. An enabled router
 still installs TCX programs on every named bind interface.
+
+### Check rx-gro-list
+
+Nylon startup does not inspect `rx-gro-list`. Check every named bind interface
+and disable the feature if it is on:
+
+```sh
+ethtool -k eth0 | grep '^rx-gro-list:'
+sudo ethtool -K eth0 rx-gro-list off
+```
+
+Linux normally leaves `rx-gro-list` off. Interface LRO and hardware GRO may
+remain enabled; only this optional software frag-list aggregation is
+incompatible with the restored UDP carrier.
 
 ## Firewall and NAT
 
@@ -191,11 +205,6 @@ directions:
 The transformer handles ordinary IPv4 and IPv6 packets. Fragmented packets,
 IPv4 options, and IPv6 extension-header paths are not carrier formats.
 
-Keep `rx-gro-list` disabled on named bind interfaces. Unlike LRO and hardware
-GRO, this optional software mode creates frag-list aggregates that a normal UDP
-socket cannot receive intact after TCX restores the UDP carrier. Linux leaves
-`rx-gro-list` disabled by default.
-
 The Linux TCP stack does not own this connection. Nylon maintains the minimal
 sequence state needed for a SYN/SYN-ACK/ACK handshake, TCP-shaped data packets,
 and FIN/RST handling. Consequently, `ss -ltn` shows no listener and `ss -tn`
@@ -255,7 +264,6 @@ managed interfaces and port.
 | --- | --- |
 | `tcp_obfuscation requires linux on amd64 or arm64` | Run Nylon on a supported Linux architecture. |
 | `tcp_obfuscation requires at least one bind with an interface` | Add `binds: [{interface: ...}]` to that router's `node.yaml`. |
-| Fake-TCP data stops after enabling `rx-gro-list` | Disable `rx-gro-list` on every named bind interface; LRO and hardware GRO may remain enabled. |
 | TCX or eBPF attachment fails | Confirm Linux is at least 6.6 and Nylon has permission to load and attach the programs. |
 | No `fake-tcp` candidate appears | Confirm both router entries enable the capability and the local candidate uses a named-interface bind. |
 | The `fake-tcp` candidate stays inactive | Check that TCP reaches the published port in both directions and that both Nylon processes are running. |

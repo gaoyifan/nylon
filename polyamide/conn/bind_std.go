@@ -7,7 +7,6 @@ package conn
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -19,7 +18,6 @@ import (
 	"time"
 
 	"github.com/encodeous/nylon/perf"
-	"github.com/encodeous/nylon/polyamide/faketcp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
@@ -336,26 +334,35 @@ func (p *fakeTCPPending) append(data []byte, ep *StdNetEndpoint, framed bool) {
 
 func (p *fakeTCPPending) receive(bufs [][]byte, sizes []int, eps []Endpoint) int {
 	n := 0
+	var exposedEP *StdNetEndpoint
 	for n < len(bufs) && len(p.packets) > 0 {
 		packet := &p.packets[0]
+		var data, remaining []byte
 		if packet.framed {
-			length := int(binary.BigEndian.Uint16(packet.data[:faketcp.FrameHeaderSize]))
-			sizes[n] = copy(bufs[n], packet.data[faketcp.FrameHeaderSize:faketcp.FrameHeaderSize+length])
-			packet.data = packet.data[faketcp.FrameHeaderSize+length:]
+			data, remaining, _ = nextFakeTCPFrame(packet.data)
 		} else {
-			sizes[n] = copy(bufs[n], packet.data)
-			packet.data = nil
+			data = packet.data
 		}
+		if len(bufs[n]) < len(data) {
+			sizes[n] = 0
+			eps[n] = nil
+			n++
+			continue
+		}
+		sizes[n] = copy(bufs[n], data)
 		eps[n] = packet.ep
+		exposedEP = packet.ep
+		packet.data = remaining
 		n++
 		if len(packet.data) == 0 {
 			*packet = fakeTCPPendingPacket{}
 			p.packets = p.packets[1:]
-		} else {
-			pendingEP := *packet.ep
-			pendingEP.src = append([]byte(nil), packet.ep.src...)
-			packet.ep = &pendingEP
 		}
+	}
+	if len(p.packets) > 0 && p.packets[0].ep == exposedEP {
+		pendingEP := *exposedEP
+		pendingEP.src = append([]byte(nil), exposedEP.src...)
+		p.packets[0].ep = &pendingEP
 	}
 	if len(p.packets) == 0 {
 		p.packets = nil
@@ -445,6 +452,7 @@ func (s *StdNetBind) receiveIP(
 	var frameCounts [IdealBatchSize]int
 	retained := 0
 	total := 0
+	deferred := false
 	for i := 0; i < numMsgs; i++ {
 		msg := &(*msgs)[i]
 		if msg.N == 0 {
@@ -459,26 +467,48 @@ func (s *StdNetBind) receiveIP(
 			if frames == 0 {
 				continue
 			}
+			if deferred {
+				pending.append(payload, ep, true)
+				continue
+			}
 			available := len(bufs) - total
 			if available == 0 {
 				pending.append(payload, ep, true)
+				deferred = true
 				continue
 			}
 			payloadAt := len(payload)
 			if frames > available {
-				payloadAt = 0
+				remaining := payload
 				for range available {
-					length := int(binary.BigEndian.Uint16(payload[payloadAt : payloadAt+faketcp.FrameHeaderSize]))
-					payloadAt += faketcp.FrameHeaderSize + length
+					_, remaining, _ = nextFakeTCPFrame(remaining)
 				}
-				pending.append(payload[payloadAt:], ep, true)
+				payloadAt = len(payload) - len(remaining)
 				frames = available
+			}
+			fits := len(bufs[retained]) >= payloadAt
+			remaining := payload
+			for j := 0; fits && j < frames; j++ {
+				var frame []byte
+				frame, remaining, _ = nextFakeTCPFrame(remaining)
+				fits = len(bufs[total+j]) >= len(frame)
+			}
+			if !fits {
+				pending.append(payload, ep, true)
+				deferred = true
+				continue
+			}
+			if payloadAt < len(payload) {
+				pending.append(payload[payloadAt:], ep, true)
+				deferred = true
 			}
 			msg.N = copy(bufs[retained], payload[:payloadAt])
 			frameCounts[retained] = frames
 			outputCount = frames
-		} else if total == len(bufs) {
+		} else if deferred || total == len(bufs) ||
+			len(bufs[retained]) < msg.N || len(bufs[total]) < msg.N {
 			pending.append(msg.Buffers[0][:msg.N], ep, false)
+			deferred = true
 			continue
 		} else if retained != i {
 			msg.N = copy(bufs[retained], msg.Buffers[0][:msg.N])
@@ -509,13 +539,11 @@ func (s *StdNetBind) receiveIP(
 		outputAt -= frames
 		framed := bufs[i][:sizes[i]]
 		ep := eps[i]
-		at := 0
 		for j := 0; j < frames; j++ {
-			length := int(binary.BigEndian.Uint16(framed[at : at+faketcp.FrameHeaderSize]))
-			at += faketcp.FrameHeaderSize
-			sizes[outputAt+j] = copy(bufs[outputAt+j], framed[at:at+length])
+			var frame []byte
+			frame, framed, _ = nextFakeTCPFrame(framed)
+			sizes[outputAt+j] = copy(bufs[outputAt+j], frame)
 			eps[outputAt+j] = ep
-			at += length
 		}
 	}
 	perf.RecvBatchSize.Add(float64(total))

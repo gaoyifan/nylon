@@ -305,12 +305,11 @@ func marshalFakeTCPPacket(packet fakeTCPPacket) []byte {
 	// WireGuard relinquishes its oversized message buffer after Send.
 	if len(packet.payload) > 0 && cap(packet.payload) >= length {
 		carrier = packet.payload[:length]
-		copy(carrier[faketcp.CarrierHeaderSize+faketcp.FrameHeaderSize:], packet.payload)
 	} else {
 		carrier = make([]byte, length)
-		if len(packet.payload) > 0 {
-			copy(carrier[faketcp.CarrierHeaderSize+faketcp.FrameHeaderSize:], packet.payload)
-		}
+	}
+	if len(packet.payload) > 0 {
+		copy(carrier[faketcp.CarrierHeaderSize+faketcp.FrameHeaderSize:], packet.payload)
 	}
 	binary.BigEndian.PutUint16(carrier[0:2], faketcp.CarrierMagic)
 	if len(packet.payload) > 0 {
@@ -325,6 +324,18 @@ func marshalFakeTCPPacket(packet fakeTCPPacket) []byte {
 		copy(carrier[12:16], []byte{1, 3, 3, 14})
 	}
 	return carrier
+}
+
+func nextFakeTCPFrame(data []byte) (frame, remaining []byte, ok bool) {
+	if len(data) < faketcp.FrameHeaderSize {
+		return nil, nil, false
+	}
+	length := int(binary.BigEndian.Uint16(data[:faketcp.FrameHeaderSize]))
+	if length < faketcp.MinFramePayloadSize || length > len(data)-faketcp.FrameHeaderSize {
+		return nil, nil, false
+	}
+	end := faketcp.FrameHeaderSize + length
+	return data[faketcp.FrameHeaderSize:end], data[end:], true
 }
 
 func (s *StdNetBind) sendFakeTCPPackets(ep *StdNetEndpoint, packets []fakeTCPPacket) error {
@@ -403,14 +414,11 @@ func (s *StdNetBind) receiveFakeTCP(carrier []byte, ep *StdNetEndpoint) ([]byte,
 	frameCount := 0
 	if flags&faketcp.TCPFlagSYN == 0 && len(payload) > 0 {
 		for remaining := payload; len(remaining) > 0; frameCount++ {
-			if len(remaining) < faketcp.FrameHeaderSize {
+			_, next, ok := nextFakeTCPFrame(remaining)
+			if !ok {
 				return nil, 0, true
 			}
-			length := int(binary.BigEndian.Uint16(remaining[:faketcp.FrameHeaderSize]))
-			if length == 0 || length > len(remaining)-faketcp.FrameHeaderSize {
-				return nil, 0, true
-			}
-			remaining = remaining[faketcp.FrameHeaderSize+length:]
+			remaining = next
 		}
 	}
 	packet := fakeTCPPacket{

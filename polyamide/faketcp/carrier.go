@@ -5,10 +5,11 @@ package faketcp
 import "encoding/binary"
 
 const (
-	CarrierMagic      uint16 = 0x4e59
-	CarrierHeaderSize        = 12
-	FrameHeaderSize          = 2
-	SYNOptionSize            = 4
+	CarrierMagic        uint16 = 0x4e59
+	CarrierHeaderSize          = 12
+	FrameHeaderSize            = 2
+	MinFramePayloadSize        = 32
+	SYNOptionSize              = 4
 
 	TCPFlagFIN uint8 = 0x01
 	TCPFlagSYN uint8 = 0x02

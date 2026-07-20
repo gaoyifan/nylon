@@ -151,6 +151,17 @@ static __always_inline __u32 add_be32(__u32 sum, __be32 value)
 	return sum + (host >> 16) + (host & 0xffff);
 }
 
+static __always_inline __u32 subtract_be16(__u32 sum, __be16 value)
+{
+	return sum + ((~bpf_ntohs(value)) & 0xffff);
+}
+
+static __always_inline __u32 subtract_be32(__u32 sum, __be32 value)
+{
+	__u32 host = bpf_ntohl(value);
+	return sum + ((~(host >> 16)) & 0xffff) + ((~host) & 0xffff);
+}
+
 static __always_inline __be16 finish_checksum(__u32 sum)
 {
 	sum = (sum & 0xffff) + (sum >> 16);
@@ -227,6 +238,32 @@ static __always_inline __u32 tcp_header_sum(struct tcp_header *tcp, __u32 sum)
 	sum += ((__u32)tcp->data_offset << 8) + tcp->flags;
 	sum = add_be16(sum, tcp->window);
 	sum = add_be16(sum, tcp->urgent);
+	return sum;
+}
+
+static __always_inline __u32 subtract_tcp_header(struct tcp_header *tcp,
+						  __u32 sum)
+{
+	sum = subtract_be16(sum, tcp->source);
+	sum = subtract_be16(sum, tcp->destination);
+	sum = subtract_be32(sum, tcp->sequence);
+	sum = subtract_be32(sum, tcp->acknowledgement);
+	sum += (~(((__u32)tcp->data_offset << 8) + tcp->flags)) & 0xffff;
+	sum = subtract_be16(sum, tcp->window);
+	sum = subtract_be16(sum, tcp->urgent);
+	return sum;
+}
+
+static __always_inline __u32 carrier_header_sum(struct udp_carrier *carrier,
+						  __u32 sum)
+{
+	sum = add_be16(sum, carrier->source);
+	sum = add_be16(sum, carrier->destination);
+	sum = add_be16(sum, carrier->length);
+	sum = add_be16(sum, carrier->magic);
+	sum = add_be16(sum, carrier->meta);
+	sum = add_be32(sum, carrier->sequence);
+	sum = add_be32(sum, carrier->acknowledgement);
 	return sum;
 }
 
@@ -334,6 +371,7 @@ int fake_tcp_egress(struct __sk_buff *skb)
 		.sequence = carrier->sequence,
 		.acknowledgement = carrier->acknowledgement,
 		.data_offset = 0x50,
+		.flags = TCP_FLAG_ACK,
 		.window = bpf_htons(0xffff),
 	};
 	__u32 payload_sum = 0;
@@ -351,15 +389,12 @@ int fake_tcp_egress(struct __sk_buff *skb)
 			option_one = *(__be16 *)&option[0];
 			option_two = *(__be16 *)&option[2];
 		} else {
-			tcp.flags = TCP_FLAG_ACK;
 			payload_sum = meta;
 		}
 	} else if (info.l4_length == sizeof(struct udp_carrier)) {
 		if (meta != TCP_FLAG_ACK)
 			return TCX_DROP;
-		tcp.flags = TCP_FLAG_ACK;
 	} else {
-		tcp.flags = TCP_FLAG_ACK;
 		payload_sum = meta;
 	}
 
@@ -463,6 +498,14 @@ int fake_tcp_ingress(struct __sk_buff *skb)
 		.sequence = tcp.sequence,
 		.acknowledgement = tcp.acknowledgement,
 	};
+	if (skb->gso_segs <= 1) {
+		__u32 sum = (~bpf_ntohs(tcp.checksum)) & 0xffff;
+		sum = subtract_tcp_header(&tcp, sum);
+		sum += (~IPPROTO_TCP) & 0xffff;
+		sum = carrier_header_sum(&carrier, sum);
+		sum += IPPROTO_UDP;
+		carrier.checksum = finish_checksum(sum);
+	}
 	struct ipv4_header ipv4 = {};
 	if (info.version == 4)
 		ipv4 = *(struct ipv4_header *)(data + sizeof(struct eth_header));

@@ -3,6 +3,7 @@
 package conn_test
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"net/netip"
@@ -45,9 +46,9 @@ func TestFakeTCPLoopbackHandshakeAndBatchData(t *testing.T) {
 	})
 
 	payloads := [][]byte{
-		[]byte("first!"),
-		[]byte("second"),
-		{0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		bytes.Repeat([]byte{1}, faketcp.MinFramePayloadSize),
+		bytes.Repeat([]byte{2}, faketcp.MinFramePayloadSize+1),
+		bytes.Repeat([]byte{3}, faketcp.MinFramePayloadSize+2),
 	}
 	received := make(chan []byte, len(payloads))
 	receiveErrors := make(chan error, len(receivers))
