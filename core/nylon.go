@@ -113,6 +113,9 @@ func NewNylon(ccfg state.CentralCfg, ncfg state.LocalCfg, logLevel slog.Level, c
 	if ncfg.TransitCost > 0 {
 		rt.TransitCost = state.DurationToMetric(ncfg.TransitCost)
 	}
+	if ncfg.TCPCost != 0 {
+		rt.TCPCost = ncfg.TCPCost
+	}
 
 	handlers := make([]slog.Handler, 0)
 	if opts.DBG_log_json {

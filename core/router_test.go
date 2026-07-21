@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/encodeous/nylon/polyamide/conn"
 	"github.com/encodeous/nylon/state"
 	"github.com/stretchr/testify/assert"
 )
@@ -1558,4 +1559,36 @@ func TestRouterTransitCost(t *testing.T) {
 	a := h.GetActions()
 	a.AssertContains(t, BroadcastUpdateRoute(MakePubRoute("S", sPrefix, 0, 102)))
 	a.AssertContains(t, BroadcastUpdateRoute(MakePubRoute("A", aPrefix, 0, 0)))
+}
+
+func TestRouterTCPCostAffectsLocalSelectionAndAdvertisedMetric(t *testing.T) {
+	tunables := ConfigureConstants()
+	tunables.TCPCost = -5 * time.Millisecond
+
+	h := &RouterHarness{}
+	aPrefix := nodeToPrefix("A")
+	sPrefix := nodeToPrefix("S")
+	rs := &state.RouterState{
+		RouterTunables: tunables,
+		Id:             "A",
+		SelfSeqno:      make(map[netip.Prefix]uint16),
+		Routes:         make(map[netip.Prefix]state.SelRoute),
+		Sources:        make(map[state.Source]state.FD),
+		Neighbours:     MakeNeighbours("B", "C"),
+		Advertised:     map[netip.Prefix]state.Advertisement{aPrefix: {NodeId: "A", Expiry: maxTime}},
+	}
+
+	tcp := state.NewEndpoint(state.NewDynamicEndpoint("192.0.2.1:57175"), false, nil, tunables)
+	tcp.Transport = conn.TransportFakeTCP
+	tcp.Renew()
+	rs.GetNeighbour("B").Eps = append(rs.GetNeighbour("B").Eps, tcp)
+	_ = AddLink(rs, NewMockEndpoint("C", 997000))
+
+	h.NeighUpdate(rs, "B", "S", sPrefix, 0, 0)
+	h.NeighUpdate(rs, "C", "S", sPrefix, 0, 0)
+	ComputeRoutes(rs, h)
+
+	assert.Equal(t, state.NodeId("B"), rs.Routes[sPrefix].Nh)
+	assert.Equal(t, uint32(995000), rs.Routes[sPrefix].Metric)
+	h.GetActions().AssertContains(t, BroadcastUpdateRoute(MakePubRoute("S", sPrefix, 0, 995000)))
 }

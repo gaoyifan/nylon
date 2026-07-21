@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
@@ -213,6 +214,16 @@ routers:
 	if assert.Len(t, central.Routers, 1) {
 		assert.True(t, central.Routers[0].TCPObfuscation)
 	}
+}
+
+func TestLocalTCPCostYAML(t *testing.T) {
+	var local LocalCfg
+	err := yaml.Unmarshal([]byte("tcp_cost: -5ms\n"), &local)
+	assert.NoError(t, err)
+	assert.Equal(t, -5*time.Millisecond, local.TCPCost)
+
+	var defaults LocalCfg
+	assert.Zero(t, defaults.TCPCost)
 }
 
 func TestNodeConfigValidatorRejectsSelectorlessBind(t *testing.T) {

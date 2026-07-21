@@ -5,9 +5,10 @@ import "time"
 // RouterTunables contains all timing and algorithm parameters for the router.
 // These are set once at startup and should not be mutated after the Nylon instance starts.
 type RouterTunables struct {
-	HopCost               uint32 // add a 5 microsecond hop cost to prevent loops on ultra-fast networks.
-	TransitCost           uint32 // extra cost (microseconds) added to routes learned from neighbours, penalizing transit through this node; own prefixes are unaffected (transit_cost in node.yaml)
-	LargeChangeThreshold  uint32 // 100 milliseconds change
+	HopCost               uint32        // add a 5 microsecond hop cost to prevent loops on ultra-fast networks.
+	TransitCost           uint32        // extra cost (microseconds) added to routes learned from neighbours, penalizing transit through this node; own prefixes are unaffected (transit_cost in node.yaml)
+	TCPCost               time.Duration // signed local fake-TCP preference applied to outbound selection and link cost (tcp_cost in node.yaml)
+	LargeChangeThreshold  uint32        // 100 milliseconds change
 	SeqnoRequestHopCount  uint8
 	RouteUpdateDelay      time.Duration
 	ProbeDelay            time.Duration

@@ -37,6 +37,11 @@ exit_node_default_route: false # Default: false - when used with exit_node, inst
 # Useful for low-bandwidth nodes, e.g. transit_cost: 250ms
 transit_cost: 0s
 
+# Signed local preference for fake TCP. This applies to outbound endpoint
+# selection and once to the resulting link/route metric. For example, -5ms
+# lets fake TCP win when it is no more than 5ms slower than UDP.
+tcp_cost: 0s
+
 # Per-flow exit selection via MPLS (optional, no config needed): a node's binary
 # id is also its MPLS label, so you can steer any traffic out through any
 # exit-advertising node just by routing it into nylon with an MPLS-encap route,

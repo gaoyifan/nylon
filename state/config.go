@@ -108,6 +108,11 @@ type LocalCfg struct {
 	// node if the alternative paths are worse by more than this amount.
 	TransitCost time.Duration `yaml:"transit_cost,omitempty"`
 
+	// TCPCost adjusts the local preference for fake-TCP endpoints. It is
+	// added once to the selected fake-TCP outbound link cost and may be
+	// negative, e.g. "-5ms" lets TCP win when it is up to 5ms slower.
+	TCPCost time.Duration `yaml:"tcp_cost,omitempty"`
+
 	// Exit-node feature. A node may advertise itself as an exit, use another
 	// node as its exit, both, or neither. Note: combining ExitNode with
 	// ExitNodeDefaultRoute on a node that also advertises an exit would route

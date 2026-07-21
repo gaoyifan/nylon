@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -52,6 +53,15 @@ func TestNodeConfigValidator_DnsResolver(t *testing.T) {
 		Port:         5,
 		Key:          [32]byte{1},
 		DnsResolvers: []string{"1.1.1.1"},
+	}))
+}
+
+func TestNodeConfigValidatorAllowsNegativeTCPCost(t *testing.T) {
+	assert.NoError(t, NodeConfigValidator(nil, &LocalCfg{
+		Id:      "valid-node",
+		Port:    57175,
+		Key:     [32]byte{1},
+		TCPCost: -5 * time.Millisecond,
 	}))
 }
 
