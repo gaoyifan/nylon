@@ -268,6 +268,7 @@ type NylonEndpoint struct {
 	DynEP         *DynamicEndpoint
 	Bind          LocalBind
 	Transport     conn.Transport
+	bindIfIndex   atomic.Int32
 
 	// LinkId is a process-unique identifier carried in outgoing probes and
 	// echoed back in replies (see protocol.Ny_Probe).
@@ -306,6 +307,26 @@ func (ep *NylonEndpoint) AsNylonEndpoint() *NylonEndpoint {
 	return ep
 }
 
+// BindInterfaceIndex resolves the configured bind interface once for the
+// lifetime of this endpoint. Config reconciliation replaces endpoints whose
+// bind changes, and the fake-TCP interface watcher restarts Nylon when a
+// tracked interface is removed.
+func (ep *NylonEndpoint) BindInterfaceIndex() (int32, error) {
+	if ep.Bind.Interface == "" {
+		return 0, nil
+	}
+	if index := ep.bindIfIndex.Load(); index != 0 {
+		return index, nil
+	}
+	iface, err := net.InterfaceByName(ep.Bind.Interface)
+	if err != nil {
+		return 0, fmt.Errorf("failed to resolve bind interface %s: %w", ep.Bind.Interface, err)
+	}
+	index := int32(iface.Index)
+	ep.bindIfIndex.CompareAndSwap(0, index)
+	return ep.bindIfIndex.Load(), nil
+}
+
 func (ep *NylonEndpoint) GetWgEndpoint(device *device.Device) (conn.Endpoint, error) {
 	ap, err := ep.DynEP.Get()
 	if err != nil {
@@ -325,13 +346,9 @@ func (ep *NylonEndpoint) GetWgEndpoint(device *device.Device) (conn.Endpoint, er
 	if setter, ok := ep.WgEndpoint.(interface {
 		SetSrc(netip.Addr, int32)
 	}); ok && (ep.Bind.Source.IsValid() || ep.Bind.Interface != "") {
-		ifidx := int32(0)
-		if ep.Bind.Interface != "" {
-			iface, err := net.InterfaceByName(ep.Bind.Interface)
-			if err != nil {
-				return nil, fmt.Errorf("failed to resolve bind interface %s: %w", ep.Bind.Interface, err)
-			}
-			ifidx = int32(iface.Index)
+		ifidx, err := ep.BindInterfaceIndex()
+		if err != nil {
+			return nil, err
 		}
 		setter.SetSrc(ep.Bind.Source, ifidx)
 	}

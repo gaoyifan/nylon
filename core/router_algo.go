@@ -380,25 +380,28 @@ func HandleNeighbourUpdate(s *state.RouterState, r Router, neighId state.NodeId,
 	}
 }
 
-func isHeldRoute(s *state.RouterState, route state.SelRoute) bool {
+func isHeldRoute(s *state.RouterState, route state.SelRoute, connectedNeighs int, hasLink bool, now time.Time) bool {
 	if route.Nh == s.Id {
 		return false // we do not hold routes to ourselves
 	}
-	connectedNeighs := 0
-	for _, neigh := range s.Neighbours {
-		if neigh.BestEndpoint() != nil {
-			connectedNeighs++
-		}
+	if route.Metric != state.INF && hasLink {
+		return false
 	}
-	neigh := s.GetNeighbour(route.Nh)
-	hasLink := neigh != nil && neigh.BestEndpoint() != nil
-	return (route.Metric == state.INF || !hasLink) &&
-		len(route.RetractedBy) < connectedNeighs &&
-		route.ExpireAt.After(time.Now())
+	return len(route.RetractedBy) < connectedNeighs && route.ExpireAt.After(now)
 }
 
 func ComputeRoutes(s *state.RouterState, r Router) {
 	newTable := make(map[netip.Prefix]state.SelRoute)
+	now := time.Now()
+	bestEndpoints := make(map[state.NodeId]state.Endpoint, len(s.Neighbours))
+	connectedNeighs := 0
+	for _, neigh := range s.Neighbours {
+		best := neigh.BestEndpoint()
+		bestEndpoints[neigh.Id] = best
+		if best != nil {
+			connectedNeighs++
+		}
+	}
 
 	// 3.5.4.  Hold Time
 	//
@@ -437,7 +440,7 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 	// In order to avoid routing loops, we pick the second option. Here, we will re-introduce held routes
 
 	for prefix, route := range s.Routes {
-		if isHeldRoute(s, route) {
+		if isHeldRoute(s, route, connectedNeighs, bestEndpoints[route.Nh] != nil, now) {
 			route.Metric = state.INF
 			newTable[prefix] = route
 		}
@@ -502,7 +505,7 @@ func ComputeRoutes(s *state.RouterState, r Router) {
 	selByPrefix := make(map[netip.Prefix]candidate)
 
 	for _, neigh := range s.Neighbours {
-		bestEp := neigh.BestEndpoint()
+		bestEp := bestEndpoints[neigh.Id]
 		if bestEp == nil {
 			r.RouterEvent(log.EventNoEndpointToNeigh, "no endpoint to neighbour", "neigh", neigh.Id)
 		}

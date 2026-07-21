@@ -24,10 +24,11 @@ func ConfigureConstants() *state.RouterTunables {
 }
 
 type MockEndpoint struct {
-	node   state.NodeId
-	metric uint32
-	active bool
-	remote bool
+	node         state.NodeId
+	metric       uint32
+	active       bool
+	remote       bool
+	activeChecks int
 }
 
 func (m MockEndpoint) Node() state.NodeId {
@@ -42,7 +43,8 @@ func (m MockEndpoint) IsRemote() bool {
 	return m.remote
 }
 
-func (m MockEndpoint) IsActive() bool {
+func (m *MockEndpoint) IsActive() bool {
+	m.activeChecks++
 	return m.active
 }
 

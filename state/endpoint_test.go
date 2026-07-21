@@ -3,6 +3,7 @@ package state
 import (
 	"math"
 	"math/rand/v2"
+	"net"
 	"net/netip"
 	"slices"
 	"testing"
@@ -17,6 +18,24 @@ func TestSameIPFamily(t *testing.T) {
 	assert.True(t, SameIPFamily(netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("2001:db8::2")))
 	assert.False(t, SameIPFamily(netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1")))
 	assert.True(t, SameIPFamily(netip.Addr{}, netip.MustParseAddr("2001:db8::1")))
+}
+
+func TestBindInterfaceIndexCachesResolvedIndex(t *testing.T) {
+	loopback, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunables := DefaultRouterTunables()
+	ep := NewEndpoint(NewDynamicEndpoint("192.0.2.1:51820"), false, nil, &tunables)
+	ep.Bind.Interface = loopback.Name
+
+	first, err := ep.BindInterfaceIndex()
+	assert.NoError(t, err)
+	second, err := ep.BindInterfaceIndex()
+	assert.NoError(t, err)
+	assert.Equal(t, int32(loopback.Index), first)
+	assert.Equal(t, first, second)
+	assert.Equal(t, first, ep.bindIfIndex.Load())
 }
 
 // linkSim drives a NylonEndpoint through simulated timestamped probe

@@ -1289,6 +1289,37 @@ func TestRouter_HeldRouteDoesNotReinstallBlackholeOnNoopRecompute(t *testing.T) 
 	assert.Empty(t, h.GetTableActions())
 }
 
+func TestComputeRoutesSnapshotsNeighbourReachability(t *testing.T) {
+	tunables := ConfigureConstants()
+	h := &RouterHarness{}
+	rs := &state.RouterState{
+		RouterTunables: tunables,
+		Id:             "A",
+		SelfSeqno:      make(map[netip.Prefix]uint16),
+		Routes:         make(map[netip.Prefix]state.SelRoute),
+		Sources:        make(map[state.Source]state.FD),
+		Neighbours:     MakeNeighbours("B"),
+		Advertised:     make(map[netip.Prefix]state.Advertisement),
+	}
+	link := AddLink(rs, NewMockEndpoint("B", 1))
+	for i := 1; i <= 20; i++ {
+		prefix := netip.MustParsePrefix(fmt.Sprintf("10.10.0.%d/32", i))
+		rs.Routes[prefix] = state.SelRoute{
+			PubRoute: state.PubRoute{
+				Source: state.Source{NodeId: "B", Prefix: prefix},
+				FD:     state.FD{Metric: 1},
+			},
+			Nh:       "B",
+			ExpireAt: maxTime,
+		}
+	}
+
+	ComputeRoutes(rs, h)
+
+	assert.LessOrEqual(t, link.activeChecks, 3,
+		"route count must not multiply neighbour endpoint scans")
+}
+
 func TestRouter5A_GCRoutes(t *testing.T) {
 	tunables := ConfigureConstants()
 	tunables.RouteExpiryTime = -1 // for testing, we want routes to expire immediately
