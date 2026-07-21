@@ -371,30 +371,30 @@ func TestCompareEndpointsDoesNotPreferUDPOnExactEquality(t *testing.T) {
 	assert.Zero(t, CompareEndpoints(fakeTCP, udp))
 }
 
-func TestTCPCostSelectsOutboundAndAdjustsLinkCostOnce(t *testing.T) {
+func TestUDPCostSelectsTCPOutbound(t *testing.T) {
 	tun := DefaultRouterTunables()
-	tun.TCPCost = -5 * time.Millisecond
+	tun.UDPCost = 5 * time.Millisecond
 	udp := stableLink(10*time.Millisecond, 10*time.Millisecond, time.Second, &tun)
 	tcp := stableLink(14*time.Millisecond, 14*time.Millisecond, time.Second, &tun)
 	tcp.ep.Transport = conn.TransportFakeTCP
 	n := neighbourOf(udp.ep, tcp.ep)
 
 	assert.Same(t, tcp.ep, n.BestEndpoint().AsNylonEndpoint())
-	assert.Equal(t, DurationToMetric(19*time.Millisecond), n.LinkCost())
+	assert.Equal(t, DurationToMetric(24*time.Millisecond), n.LinkCost())
 	assert.Equal(t, DurationToMetric(28*time.Millisecond), tcp.ep.Metric())
 }
 
-func TestTCPCostThresholdAndPenalty(t *testing.T) {
-	t.Run("outside negative threshold", func(t *testing.T) {
+func TestTransportCostThresholdAndPenalty(t *testing.T) {
+	t.Run("outside UDP penalty threshold", func(t *testing.T) {
 		tun := DefaultRouterTunables()
-		tun.TCPCost = -5 * time.Millisecond
+		tun.UDPCost = 5 * time.Millisecond
 		udp := stableLink(10*time.Millisecond, 10*time.Millisecond, time.Second, &tun)
 		tcp := stableLink(16*time.Millisecond, 16*time.Millisecond, time.Second, &tun)
 		tcp.ep.Transport = conn.TransportFakeTCP
 		n := neighbourOf(udp.ep, tcp.ep)
 
 		assert.Same(t, udp.ep, n.BestEndpoint().AsNylonEndpoint())
-		assert.Equal(t, DurationToMetric(20*time.Millisecond), n.LinkCost())
+		assert.Equal(t, DurationToMetric(25*time.Millisecond), n.LinkCost())
 	})
 
 	t.Run("positive penalty", func(t *testing.T) {
@@ -408,9 +408,9 @@ func TestTCPCostThresholdAndPenalty(t *testing.T) {
 	})
 }
 
-func TestTCPCostWarmupAndBounds(t *testing.T) {
+func TestTransportCostAppliedOnceAndBounds(t *testing.T) {
 	tun := DefaultRouterTunables()
-	tun.TCPCost = -5 * time.Millisecond
+	tun.UDPCost = 5 * time.Millisecond
 	udp := newLinkSim(&tun, time.Second)
 	tcp := newLinkSim(&tun, time.Second)
 	udp.ep.Renew()
@@ -419,13 +419,12 @@ func TestTCPCostWarmupAndBounds(t *testing.T) {
 	n := neighbourOf(udp.ep, tcp.ep)
 
 	assert.Same(t, tcp.ep, n.BestEndpoint().AsNylonEndpoint())
-	assert.Equal(t, DurationToMetric(WarmupDelay-5*time.Millisecond), n.LinkCost())
+	assert.Equal(t, DurationToMetric(WarmupDelay), n.LinkCost())
 	assert.Equal(t, DurationToMetric(WarmupDelay), tcp.ep.Metric())
 
-	tun.TCPCost = -2 * time.Second
-	assert.Zero(t, n.LinkCost())
-	assert.Equal(t, INFM, addSignedMetric(DurationToMetric(WarmupDelay), time.Duration(math.MaxInt64)))
-	assert.Equal(t, INF, addSignedMetric(INF, -time.Second))
+	assert.Equal(t, DurationToMetric(WarmupDelay+5*time.Millisecond), neighbourOf(udp.ep).LinkCost())
+	assert.Equal(t, INFM, addMetricCost(DurationToMetric(WarmupDelay), time.Duration(math.MaxInt64)))
+	assert.Equal(t, INF, addMetricCost(INF, time.Second))
 	tcp.ep.lastHeardBack = time.Time{}
 	udp.ep.lastHeardBack = time.Time{}
 	assert.Equal(t, INF, n.LinkCost())

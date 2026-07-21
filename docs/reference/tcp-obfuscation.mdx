@@ -76,8 +76,8 @@ binds:
   - interface: eth0
     # source: 192.0.2.10 # optional explicit source address
 
-# Optional signed local preference for fake TCP.
-tcp_cost: -5ms
+# Let fake TCP win when it is no more than 5ms slower than UDP.
+udp_cost: 5ms
 ```
 
 For every matching peer endpoint and interface-bearing bind, Nylon creates
@@ -233,11 +233,12 @@ can establish a new flow.
 
 UDP is always retained as an independent candidate. By default, selection uses
 only the measured endpoint delay and loss score described in
-[Link Metrics](/reference/link-metrics). The node-local `tcp_cost` option adds a
-signed preference to fake TCP: `-5ms` lets it win when its outbound score is up
-to 5ms worse than UDP, while a positive value penalizes it. The adjustment also
-appears once in the effective link and route metric; it does not alter inbound
-selection at this node.
+[Link Metrics](/reference/link-metrics). The node-local, non-negative
+`tcp_cost` and `udp_cost` options penalize their matching transport. For
+example, `udp_cost: 5ms` lets fake TCP win when its outbound score is up to 5ms
+worse than UDP. The selected outbound transport's cost also appears once in
+the effective link and route metric; neither option alters inbound selection
+at this node.
 
 WireGuard endpoint synchronization prepares each fake-TCP candidate and starts
 its handshake. Probe attempts perform the same preparation and retry an
@@ -264,11 +265,10 @@ configured custom MTU is not adjusted automatically.
 
 The `state` column shows `active` and marks the selected candidate as `best`.
 Endpoint metric, RTT, directional delay, and loss fields always remain raw
-measurements even when `tcp_cost` changes the selection. The neighbour's
-`link cost` is the effective routing value and includes the adjustment when
-the selected outbound candidate is fake TCP. A configured `fake-tcp` row can
-therefore be present but inactive while its handshake or network path is
-unavailable.
+measurements even when a transport cost changes the selection. The neighbour's
+`link cost` is the effective routing value and includes the selected outbound
+transport's cost. A configured `fake-tcp` row can therefore be present but
+inactive while its handshake or network path is unavailable.
 
 At startup, a successful attachment logs `enabled fake TCP transport` with the
 managed interfaces and port.

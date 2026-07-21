@@ -39,12 +39,12 @@ exit_node_default_route: false # with exit_node: install 0.0.0.0/0 (full tunnel)
 # paths are more than 250ms worse.
 transit_cost: 0s # default: 0s (no penalty)
 
-# Adjust this node's local preference for fake-TCP links. The signed cost is
-# applied to fake TCP during outbound endpoint selection and once to the
-# resulting link/route metric. With -5ms, fake TCP may win when its measured
-# outbound score is up to 5ms worse than UDP. Positive values penalize TCP;
-# 0 keeps selection based only on measurements.
-tcp_cost: 0s # default: 0s
+# Non-negative local penalties for each transport. The matching cost is added
+# during outbound endpoint selection and once to the resulting link/route
+# metric. With udp_cost: 5ms, fake TCP may win when its measured outbound score
+# is up to 5ms worse than UDP. Zero keeps that transport unpenalized.
+tcp_cost: 0s # default: 0s; negative values are invalid
+udp_cost: 0s # default: 0s; negative values are invalid
 
 # Local endpoint selectors. Nylon probes each peer endpoint through matching
 # binds and uses the best active link for the routing edge.

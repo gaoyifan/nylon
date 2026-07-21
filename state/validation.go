@@ -108,6 +108,12 @@ func NodeConfigValidator(central *CentralCfg, node *LocalCfg) error {
 	if node.TransitCost < 0 {
 		return fmt.Errorf("transit_cost must not be negative")
 	}
+	if node.TCPCost < 0 {
+		return fmt.Errorf("tcp_cost must not be negative")
+	}
+	if node.UDPCost < 0 {
+		return fmt.Errorf("udp_cost must not be negative")
+	}
 	// 1280 is the IPv6 minimum link MTU; the overlay always carries IPv6.
 	if node.Mtu != 0 && (node.Mtu < 1280 || node.Mtu > 65535) {
 		return fmt.Errorf("mtu must be 0 (default) or between 1280 and 65535, got %d", node.Mtu)

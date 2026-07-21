@@ -56,13 +56,17 @@ func TestNodeConfigValidator_DnsResolver(t *testing.T) {
 	}))
 }
 
-func TestNodeConfigValidatorAllowsNegativeTCPCost(t *testing.T) {
-	assert.NoError(t, NodeConfigValidator(nil, &LocalCfg{
-		Id:      "valid-node",
-		Port:    57175,
-		Key:     [32]byte{1},
-		TCPCost: -5 * time.Millisecond,
-	}))
+func TestNodeConfigValidatorTransportCosts(t *testing.T) {
+	base := LocalCfg{Id: "valid-node", Port: 57175, Key: [32]byte{1}}
+	assert.NoError(t, NodeConfigValidator(nil, &base))
+
+	tcp := base
+	tcp.TCPCost = -time.Millisecond
+	assert.ErrorContains(t, NodeConfigValidator(nil, &tcp), "tcp_cost must not be negative")
+
+	udp := base
+	udp.UDPCost = -time.Millisecond
+	assert.ErrorContains(t, NodeConfigValidator(nil, &udp), "udp_cost must not be negative")
 }
 
 func TestNodeConfigValidator_LANDiscovery(t *testing.T) {

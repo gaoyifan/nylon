@@ -1561,9 +1561,9 @@ func TestRouterTransitCost(t *testing.T) {
 	a.AssertContains(t, BroadcastUpdateRoute(MakePubRoute("A", aPrefix, 0, 0)))
 }
 
-func TestRouterTCPCostAffectsLocalSelectionAndAdvertisedMetric(t *testing.T) {
+func TestRouterUDPCostAffectsLocalSelectionAndAdvertisedMetric(t *testing.T) {
 	tunables := ConfigureConstants()
-	tunables.TCPCost = -5 * time.Millisecond
+	tunables.UDPCost = 5 * time.Millisecond
 
 	h := &RouterHarness{}
 	aPrefix := nodeToPrefix("A")
@@ -1574,7 +1574,7 @@ func TestRouterTCPCostAffectsLocalSelectionAndAdvertisedMetric(t *testing.T) {
 		SelfSeqno:      make(map[netip.Prefix]uint16),
 		Routes:         make(map[netip.Prefix]state.SelRoute),
 		Sources:        make(map[state.Source]state.FD),
-		Neighbours:     MakeNeighbours("B", "C"),
+		Neighbours:     MakeNeighbours("C", "B"),
 		Advertised:     map[netip.Prefix]state.Advertisement{aPrefix: {NodeId: "A", Expiry: maxTime}},
 	}
 
@@ -1582,13 +1582,15 @@ func TestRouterTCPCostAffectsLocalSelectionAndAdvertisedMetric(t *testing.T) {
 	tcp.Transport = conn.TransportFakeTCP
 	tcp.Renew()
 	rs.GetNeighbour("B").Eps = append(rs.GetNeighbour("B").Eps, tcp)
-	_ = AddLink(rs, NewMockEndpoint("C", 997000))
+	udp := state.NewEndpoint(state.NewDynamicEndpoint("192.0.2.2:57175"), false, nil, tunables)
+	udp.Renew()
+	rs.GetNeighbour("C").Eps = append(rs.GetNeighbour("C").Eps, udp)
 
 	h.NeighUpdate(rs, "B", "S", sPrefix, 0, 0)
 	h.NeighUpdate(rs, "C", "S", sPrefix, 0, 0)
 	ComputeRoutes(rs, h)
 
 	assert.Equal(t, state.NodeId("B"), rs.Routes[sPrefix].Nh)
-	assert.Equal(t, uint32(995000), rs.Routes[sPrefix].Metric)
-	h.GetActions().AssertContains(t, BroadcastUpdateRoute(MakePubRoute("S", sPrefix, 0, 995000)))
+	assert.Equal(t, uint32(1000000), rs.Routes[sPrefix].Metric)
+	h.GetActions().AssertContains(t, BroadcastUpdateRoute(MakePubRoute("S", sPrefix, 0, 1000000)))
 }

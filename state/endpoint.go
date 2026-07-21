@@ -355,8 +355,8 @@ func (ep *NylonEndpoint) GetWgEndpoint(device *device.Device) (conn.Endpoint, er
 // CompareEndpoints orders a neighbour's links by sending preference:
 // active before inactive, then links with a ready directional measurement by
 // their outbound score (stabilized relative outbound delay plus loss
-// penalty and the local fake-TCP cost; exact between links of the same
-// neighbour since they share the same clock offset), and finally by the
+// penalty and the matching local transport cost; exact between links of the
+// same neighbour since they share the same clock offset), and finally by the
 // effective endpoint metric as a fallback for links that are still warming
 // up (or are not NylonEndpoints).
 func CompareEndpoints(a, b Endpoint) int {
@@ -390,30 +390,31 @@ func outboundScore(ep Endpoint) (int64, bool) {
 		return 0, false
 	}
 	out, _, ok := nep.dirScores()
-	if nep.Transport == conn.TransportFakeTCP {
-		out += int64(nep.t.TCPCost)
-	}
+	out += int64(endpointCost(nep))
 	return out, ok
 }
 
 func effectiveEndpointMetric(ep Endpoint) uint32 {
 	metric := ep.Metric()
 	nep := ep.AsNylonEndpoint()
-	if nep == nil || nep.Transport != conn.TransportFakeTCP {
+	if nep == nil {
 		return metric
 	}
-	return addSignedMetric(metric, nep.t.TCPCost)
+	return addMetricCost(metric, endpointCost(nep))
 }
 
-func addSignedMetric(metric uint32, cost time.Duration) uint32 {
+func endpointCost(ep *NylonEndpoint) time.Duration {
+	if ep.Transport == conn.TransportFakeTCP {
+		return ep.t.TCPCost
+	}
+	return ep.t.UDPCost
+}
+
+func addMetricCost(metric uint32, cost time.Duration) uint32 {
 	if metric == INF {
 		return INF
 	}
-	adjusted := int64(metric) + cost.Microseconds()
-	if adjusted <= 0 {
-		return 0
-	}
-	return uint32(min(adjusted, int64(INFM)))
+	return uint32(min(uint64(metric)+uint64(cost.Microseconds()), uint64(INFM)))
 }
 
 // BestEndpoint returns the link this node should send on: the active link
@@ -471,10 +472,7 @@ func (n *Neighbour) LinkCost() uint32 {
 		if !ok {
 			continue
 		}
-		outScore := out
-		if nep.Transport == conn.TransportFakeTCP {
-			outScore += int64(nep.t.TCPCost)
-		}
+		outScore := out + int64(endpointCost(nep))
 		if outEp == nil || outScore < bestOut {
 			outEp, bestOut = nep, outScore
 		}
@@ -501,11 +499,7 @@ func (n *Neighbour) LinkCost() uint32 {
 	pOut := min(outEp.LossRate(), t.LossCap)
 	pIn := min(inEp.LossRate(), t.LossCap)
 	p := min(1-(1-pOut)*(1-pIn), t.LossCap)
-	metric := etxMetric(base, p, t)
-	if outEp.Transport == conn.TransportFakeTCP {
-		metric = addSignedMetric(metric, outEp.t.TCPCost)
-	}
-	return metric
+	return addMetricCost(etxMetric(base, p, t), endpointCost(outEp))
 }
 
 func (u *NylonEndpoint) isActiveUnlocked() bool {

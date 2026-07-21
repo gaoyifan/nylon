@@ -28,9 +28,9 @@ func TestBuildEndpointsReportsFakeTCPTransport(t *testing.T) {
 	}
 }
 
-func TestBuildEndpointsKeepsRawMetricWithTCPCost(t *testing.T) {
+func TestBuildEndpointsKeepsRawMetricWithTransportCost(t *testing.T) {
 	tunables := state.DefaultRouterTunables()
-	tunables.TCPCost = -5 * time.Millisecond
+	tunables.UDPCost = 5 * time.Millisecond
 	udp := state.NewEndpoint(state.NewDynamicEndpoint("192.0.2.1:57175"), false, nil, &tunables)
 	tcp := state.NewEndpoint(state.NewDynamicEndpoint("192.0.2.1:57176"), false, nil, &tunables)
 	tcp.Transport = conn.TransportFakeTCP

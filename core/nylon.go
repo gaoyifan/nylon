@@ -116,6 +116,9 @@ func NewNylon(ccfg state.CentralCfg, ncfg state.LocalCfg, logLevel slog.Level, c
 	if ncfg.TCPCost != 0 {
 		rt.TCPCost = ncfg.TCPCost
 	}
+	if ncfg.UDPCost != 0 {
+		rt.UDPCost = ncfg.UDPCost
+	}
 
 	handlers := make([]slog.Handler, 0)
 	if opts.DBG_log_json {

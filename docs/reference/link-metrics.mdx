@@ -139,10 +139,11 @@ the same computation with its own outbound delays and may well pick a
 different link. Links still warming up rank behind links with measurements;
 inactive links rank last.
 
-The optional signed `tcp_cost` from the local `node.yaml` is added to this
-outbound score for fake-TCP candidates only. A value of `-5ms` therefore lets
-fake TCP win when it is up to 5ms slower than UDP. It does not affect inbound
-selection, which is controlled by the peer's own measurements and preference.
+The optional, non-negative `tcp_cost` and `udp_cost` values from the local
+`node.yaml` are added to this outbound score for their matching transport. A
+value of `udp_cost: 5ms` therefore lets fake TCP win when it is up to 5ms slower
+than UDP. Neither value affects inbound selection, which is controlled by the
+peer's own measurements and preference.
 
 ## Routing metric: effective cycle latency
 
@@ -169,16 +170,16 @@ the ETX retransmission model on the cycle:
 metric = cycle/(1−p) + LossRetxFloor · p/(1−p)
 ```
 
-If the selected outbound link is fake TCP, the local `tcp_cost` is added once
-to this final metric. It is not also added to the cycle, so the preference is
-never counted twice. Finite results are clamped to the valid metric range.
+The selected outbound link's `tcp_cost` or `udp_cost` is added once to this
+final metric. It is not also added to the cycle, so the penalty is never
+counted twice. Finite results are clamped to the valid metric range.
 
 The result is expressed in microseconds and fed to the distance-vector
 routing layer, where per-hop costs and transit costs are added on top. A
-nonzero `tcp_cost` makes this scalar edge cost node-local because each side
-chooses and biases its own outbound transport. Babel's feasibility conditions
-and route computation are otherwise unchanged; the directional measurements
-remain confined to the hop.
+nonzero transport cost makes this scalar edge cost node-local because each side
+chooses and penalizes its own outbound transport. Babel's feasibility
+conditions and route computation are otherwise unchanged; the directional
+measurements remain confined to the hop.
 
 ## Loss measurement
 
@@ -196,7 +197,7 @@ retransmissions.
 - `transport` — `udp` or `fake-tcp` for the candidate.
 - `state` — marks the selected link as `best` alongside its activity state.
 - `metric` — raw per-link RTT-based cost (stabilized RTT with the link's own
-  loss penalty). `tcp_cost` never changes this reported value.
+  loss penalty). Transport costs never change this reported value.
 
 `nylon status --full` additionally shows:
 
@@ -208,8 +209,8 @@ retransmissions.
 - `loss` — smoothed probe loss rate.
 
 Each neighbour also shows its `link cost` — the effective cycle latency
-metric advertised to routing, including `tcp_cost` when its outbound link is
-fake TCP. The same fields are available programmatically
+metric advertised to routing, including the selected outbound transport's
+cost. The same fields are available programmatically
 via the IPC status response (`EndpointInfo.transport`, `out_excess_ns`,
 `in_excess_ns`, `selected`, `NeighbourInfo.link_cost`).
 

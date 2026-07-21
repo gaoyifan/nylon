@@ -216,14 +216,16 @@ routers:
 	}
 }
 
-func TestLocalTCPCostYAML(t *testing.T) {
+func TestLocalTransportCostsYAML(t *testing.T) {
 	var local LocalCfg
-	err := yaml.Unmarshal([]byte("tcp_cost: -5ms\n"), &local)
+	err := yaml.Unmarshal([]byte("tcp_cost: 3ms\nudp_cost: 5ms\n"), &local)
 	assert.NoError(t, err)
-	assert.Equal(t, -5*time.Millisecond, local.TCPCost)
+	assert.Equal(t, 3*time.Millisecond, local.TCPCost)
+	assert.Equal(t, 5*time.Millisecond, local.UDPCost)
 
 	var defaults LocalCfg
 	assert.Zero(t, defaults.TCPCost)
+	assert.Zero(t, defaults.UDPCost)
 }
 
 func TestNodeConfigValidatorRejectsSelectorlessBind(t *testing.T) {
