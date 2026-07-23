@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/encodeous/nylon/log"
 	"github.com/encodeous/nylon/polyamide/conn"
@@ -58,7 +59,13 @@ func NewWireGuardDevice(n *Nylon) (dev *device.Device, tunDevice tun.Device, rea
 		if !ok {
 			return nil, nil, "", fmt.Errorf("tcp_obfuscation requires the standard network bind")
 		}
-		if err := stdBind.EnableFakeTCP(n.LinkDeadThreshold); err != nil {
+		fakeTCPStaleAfter := max(
+			n.LinkDeadThreshold,
+			device.RekeyTimeout+
+				time.Duration(device.RekeyTimeoutJitterMaxMs)*time.Millisecond+
+				n.ProbeRecoveryDelay,
+		)
+		if err := stdBind.EnableFakeTCP(fakeTCPStaleAfter); err != nil {
 			return nil, nil, "", err
 		}
 	}

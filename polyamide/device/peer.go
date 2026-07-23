@@ -130,6 +130,10 @@ func (peer *Peer) SendBuffers(buffers [][]byte, eps []conn.Endpoint) error {
 	endpoints := peer.endpoints.val
 	if peer.endpoints.clearSrcOnTx {
 		for _, ep := range endpoints {
+			if stdEndpoint, ok := ep.(*conn.StdNetEndpoint); ok &&
+				stdEndpoint.Transport() == conn.TransportFakeTCP {
+				continue
+			}
 			ep.ClearSrc()
 		}
 		peer.endpoints.clearSrcOnTx = false
