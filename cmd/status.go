@@ -152,13 +152,13 @@ func printSelectedRoutes(p paletteValues, routes []*protocol.SelRoute, full bool
 		fmt.Println("    " + p.muted("none"))
 		return
 	}
-	headers := []string{"prefix", "nh", "router", "seqno", "metric"}
+	headers := []string{"prefix", "nh", "router", "metric", "seqno"}
 	rows := make([][]string, 0, len(routes))
 	for _, route := range routes {
 		pub := route.GetPubRoute()
 		src := pub.GetSource()
 		fd := pub.GetFd()
-		row := []string{src.Prefix, route.Nh, src.NodeId, fmt.Sprint(fd.Seqno), metricText(p, fd.Metric)}
+		row := []string{src.Prefix, route.Nh, src.NodeId, metricText(p, fd.Metric), fmt.Sprint(fd.Seqno)}
 		if full {
 			if len(headers) == 5 {
 				headers = append(headers, "expires", "retracted by")
@@ -278,7 +278,7 @@ func formatExcessNs(ns int64) string {
 }
 
 func printNeighRoutes(p paletteValues, neigh string, routes []*protocol.NeighRoute, full bool) {
-	headers := []string{"prefix", "router", "seqno", "metric"}
+	headers := []string{"prefix", "router", "metric", "seqno"}
 	if full {
 		headers = append(headers, "expires")
 	}
@@ -291,7 +291,7 @@ func printNeighRoutes(p paletteValues, neigh string, routes []*protocol.NeighRou
 		if src.NodeId == neigh {
 			prefix = p.good(prefix)
 		}
-		row := []string{prefix, src.NodeId, fmt.Sprint(fd.Seqno), metricText(p, fd.Metric)}
+		row := []string{prefix, src.NodeId, metricText(p, fd.Metric), fmt.Sprint(fd.Seqno)}
 		if full {
 			row = append(row, formatExpiry(route.ExpireAtUnix))
 		}
@@ -340,9 +340,9 @@ func printFeasibilityDistances(p paletteValues, distances []*protocol.Feasibilit
 	for _, dist := range distances {
 		src := dist.GetSource()
 		fd := dist.GetFd()
-		rows = append(rows, []string{src.Prefix, src.NodeId, fmt.Sprint(fd.Seqno), metricText(p, fd.Metric)})
+		rows = append(rows, []string{src.Prefix, src.NodeId, metricText(p, fd.Metric), fmt.Sprint(fd.Seqno)})
 	}
-	printTable(p, 1, []string{"prefix", "router", "seqno", "metric"}, rows)
+	printTable(p, 1, []string{"prefix", "router", "metric", "seqno"}, rows)
 }
 
 func init() {

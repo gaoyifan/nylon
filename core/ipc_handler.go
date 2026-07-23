@@ -306,7 +306,14 @@ func buildNeighRoutes(neigh *state.Neighbour) []*protocol.NeighRoute {
 func buildRouteTables(n *Nylon) *protocol.RouteTables {
 	tables := &protocol.RouteTables{}
 	for _, route := range n.RouterState.Routes {
-		tables.Selected = append(tables.Selected, selRouteProto(route))
+		entry := selRouteProto(route)
+		entry.PubRoute.Fd.Metric = statusMetric(
+			entry.PubRoute.Fd.Metric,
+			route.Source.NodeId,
+			n.RouterState.Id,
+			n.RouterState.TransitCost,
+		)
+		tables.Selected = append(tables.Selected, entry)
 	}
 	slices.SortFunc(tables.Selected, func(a, b *protocol.SelRoute) int {
 		return comparePubRoute(a.PubRoute, b.PubRoute)
@@ -333,6 +340,7 @@ func buildRouteTables(n *Nylon) *protocol.RouteTables {
 func buildFeasibilityDistances(n *Nylon) []*protocol.FeasibilityDistance {
 	entries := make([]*protocol.FeasibilityDistance, 0, len(n.RouterState.Sources))
 	for source, fd := range n.RouterState.Sources {
+		fd.Metric = statusMetric(fd.Metric, source.NodeId, n.RouterState.Id, n.RouterState.TransitCost)
 		entries = append(entries, &protocol.FeasibilityDistance{
 			Source: sourceProto(source),
 			Fd:     fdProto(fd),
@@ -345,6 +353,13 @@ func buildFeasibilityDistances(n *Nylon) []*protocol.FeasibilityDistance {
 		return cmp.Compare(a.Source.NodeId, b.Source.NodeId)
 	})
 	return entries
+}
+
+func statusMetric(metric uint32, source, local state.NodeId, transitCost uint32) uint32 {
+	if metric == state.INF || source == local {
+		return metric
+	}
+	return metric - transitCost
 }
 
 func advertisementsForNode(n *Nylon, id state.NodeId) []*protocol.Advertisement {

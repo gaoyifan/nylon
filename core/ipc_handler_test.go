@@ -49,6 +49,20 @@ func TestBuildEndpointsKeepsRawMetricWithTransportCost(t *testing.T) {
 	}
 }
 
+func TestStatusMetricExcludesLocalTransitCost(t *testing.T) {
+	const transitCost = uint32(100)
+
+	if got := statusMetric(125, "remote", "local", transitCost); got != 25 {
+		t.Fatalf("remote metric = %d, want 25", got)
+	}
+	if got := statusMetric(125, "local", "local", transitCost); got != 125 {
+		t.Fatalf("local metric = %d, want 125", got)
+	}
+	if got := statusMetric(state.INF, "remote", "local", transitCost); got != state.INF {
+		t.Fatalf("infinite metric = %d, want %d", got, state.INF)
+	}
+}
+
 func TestIPCProbeTimeout(t *testing.T) {
 	tests := []struct {
 		name      string
